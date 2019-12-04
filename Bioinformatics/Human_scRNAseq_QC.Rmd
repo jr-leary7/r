@@ -1,0 +1,176 @@
+---
+title: "Human scRNAseq -- QC and Preprocessing"
+author: "Jack Leary"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: yeti
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+# Libraries
+```{r, message=FALSE, warning=FALSE}
+library(scater)
+library(scran)
+library(DropletUtils)
+library(biomaRt)
+library(tidyverse)
+library(dbscan)
+library(svd)
+library(Rtsne)
+library(igraph)
+library(cluster)
+```
+
+# Data Importation
+Before knitting the .Rmd, make sure to replace the run and sample names below with the desired files. The ```read10xCounts``` function generates an $n\times m$ count matrix with $n$ genes and $m$ cells.
+```{r}
+path1 <- "/Volumes/Home/Jen Jen Yeh Lab/Single Cell Seq"
+path2 <- paste0(path1, "/eaton96/cellranger/Human_P190822T1Pi_scRNAseq/outs/raw_feature_bc_matrix/")
+sce <- read10xCounts(path2, col.names = TRUE)
+samplename <- "Human_P190822T1Pi"
+colData(sce)$samplename <- samplename
+```
+
+# Quality Control
+## Gene Annotation
+The genes are annotated using the ```biomaRt``` package from https://www.bioconductor.org. 
+```{r, message=FALSE, warning=FALSE}
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl", host="grch37.ensembl.org")
+attrs <- c("ensembl_gene_id", "hgnc_symbol", "chromosome_name", "start_position", 
+           "end_position", "strand", "description", "percentage_gene_gc_content", 
+           "gene_biotype")
+gene_anno <- getBM(attributes = attrs, 
+                   filters = "ensembl_gene_id", 
+                   values = rowData(sce)$ID, 
+                   mart = ensembl)
+saveRDS(gene_anno, "/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Human QC/gene_annotation.rds")
+gene_anno <- readRDS("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Human QC/gene_annotation.rds")
+gene_anno <- distinct(gene_anno, ensembl_gene_id, .keep_all = TRUE)
+
+missing_genes <- setdiff(rowData(sce)$ID, gene_anno$ensembl_gene_id)
+if (length(missing_genes) > 0) {
+  print(head(missing_genes))
+}
+
+to_keep <- match(gene_anno$ensembl_gene_id, rowData(sce)$ID)
+to_keep <- na.omit(to_keep)
+if (dim(sce)[1] != length(to_keep)) {
+  sce <- sce[to_keep, ]
+}
+
+load("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Human QC/ExonicGeneLengths_GRCh37.RData")
+names(exonic.gene.sizes) = sub("\\.[^.]*", "", names(exonic.gene.sizes))
+gene_anno$gene_length <- unlist(exonic.gene.sizes)[gene_anno$ensembl_gene_id]
+to_keep <- which(!is.na(gene_anno$gene_length))
+if (length(to_keep) != dim(gene_anno)[1]) {
+  gene_anno <- gene_anno[to_keep, ]
+  sce <- sce[to_keep, ]
+}
+
+rowData(sce) <- gene_anno
+rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ensembl_gene_id, 
+                                      rowData(sce)$hgnc_symbol)
+```
+
+## Identify Low-Quality Cells
+Since 10xGenomics data uses droplet-based sequencing, we can use the ```emptyDrops``` function to distinguish between droplets containing cells and those containing only ambient RNA. This procedure uses Monte Carlo simulation and a false-discovery rate correction to assign likelihoods of containing cells to each droplet.
+```{r}
+bc_ranks <- barcodeRanks(counts(sce))
+inflection <- metadata(bc_ranks)$inflection
+knee <- metadata(bc_ranks)$knee
+
+e_out <- emptyDrops(counts(sce))
+is_cell <- e_out$FDR <= .01
+
+to_keep <- which(is_cell & e_out$Total >= inflection)
+sce <- sce[, to_keep]
+```
+
+## Remove Mitochondrial Genes
+Next, we remove genes that have a high proportion of mitochondrial genes.
+```{r}
+ribo <- read.table("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Human QC/ribosome_genes.txt", 
+                   sep = '\t', header = TRUE, stringsAsFactors = FALSE)
+is_mito <- which(rowData(sce)$chromosome_name == "MT")
+is_ribo <- which(rowData(sce)$gene_biotype == "rRNA")
+
+sce <- calculateQCMetrics(sce, feature_controls = list(Mt = is_mito, 
+                                                       Ri = is_ribo))
+
+high_mito <- isOutlier(sce$pct_counts_Mt, nmads = 3, type = "higher")
+if (sum(high_mito == TRUE) > 0) {
+  sce <- sce[, !high_mito]
+}
+```
+
+## Remove Lowly Expressed Genes
+Now we remove those genes which are expressed in less than 2 cells.
+```{r}
+names(rowData(sce))[6] = "strand_n"  # prevents an error message
+sce <- sce[which(rowData(sce)$n_cells_by_counts > 1), ]
+```
+
+## Normalization
+As suggested by original Yeh Lab scRNA-seq pipeline creator Chong Jin, the ```computeSumFactors``` function can take a clustering of cells (performed here using a graph-based method) to account for heterogeneity in gene expression across cell types and sizes. Expression is normalized within and between clusters of cells, and added to the Single Cell Experiment object using ```normalize```. This is a more sophisticated method than using a simple log transform like we use for bulk RNAseq.
+```{r}
+clusts <- quickCluster(sce, method = "igraph", use.ranks = TRUE, min.mean = 0.1)
+sce <- computeSumFactors(sce, clusters = clusts)
+sce <- scater::normalize(sce)
+```
+
+# Dimension Reduction
+Here we perform Principal Component Analysis using the ```svd``` package, after first identifying those genes that demonstrate high levels of biological signal relative to noise using the ```decomposeVar``` function. Next, we run 3-dimensional t-SNE and UMAP on top of our principal components, then add those low-dimensional representations of our count data to the Single Cell Experiment object.
+```{r, message=FALSE, warning=FALSE}
+trend <- makeTechTrend(x = sce)
+fit <- trendVar(sce, use.spikes = FALSE, block = colData(sce)$samplename, 
+                method = "loess", loess.args = list(span = 0.05))
+fit$trend <- trend
+decomp_var <- decomposeVar(fit = fit)
+decomp_var$bio[which(decomp_var$bio < 1e-8)] = 1e-8
+decomp_var$FDR[which(decomp_var$FDR < 1e-100)] = 1e-100
+to_keep <- which(decomp_var$FDR < 1e-10 & decomp_var$bio > 0.01)
+sce <- sce[to_keep, ]
+
+# PCA 'by hand'
+log_counts <- t(as.matrix(logcounts(sce)))
+log_counts <- scale(log_counts)
+svd1 <- propack.svd(log_counts, neig = 50)
+my_pca <- t(svd1$d * t(svd1$u))
+# t-SNE (not by hand)
+my_tsne <- Rtsne(my_pca, pca = FALSE, dims = 3)
+reducedDims(sce) <- SimpleList(PCA = my_pca, TSNE = my_tsne$Y)
+# and since we don't want to run UMAP by hand 
+sce <- runUMAP(sce, ncomponents = 3, use_dimred = "PCA")
+```
+
+# Clustering
+There are a multitude of different approaches to cluster analysis, each with various strengths and weaknesses. Here we use three different methods, and allow the analyst their choice as to which results are added to the Single Cell Experiment object before it is exported and saved. Hierarchical density-based spatial clustering of applications with noise (aka ```hdbscan```) combines density based clustering, which isn't reliant on any sort of assumptions about the shape of the data, with hierarchical methods. Graph-based clustering, in this case using the ```igraph``` function, uses network analysis to assign cells to "communities." Finally, a basic k-means approach is used to assign cells to a pre-determined number of clusters. The number of clusters is determined by choosing a $k$ that cooresponds to the most parsimonious gap statistic, i.e. the $k$ that has the highest statistically significant decrease in observed sum of squares error. Of course further, more detailed cluster analysis can (and should) be done when performing downstream analysis; these results are simply a baseline.
+```{r, message=FALSE, warning=FALSE}
+set.seed(629)
+dbscan_clust <- hdbscan(reducedDim(sce, "TSNE"), minPts = 5)
+
+graph <- buildSNNGraph(sce, k = 10, use.dimred = "TSNE")
+igraph_clust <- cluster_walktrap(graph)$membership
+
+gaps <- clusGap(reducedDim(sce, "TSNE"), kmeans, K.max = 20)
+best_k <- maxSE(gaps$Tab[, "gap"], gaps$Tab[, "SE.sim"])
+best_k
+kmean_clust <- kmeans(reducedDim(sce, "TSNE"), centers = best_k, iter.max = 150, 
+                      nstart = 50, algorithm = "MacQueen")
+
+# choose your favorite clustering results (mine is HDBSCAN) and assign it to the sce object
+sce$cluster <- factor(dbscan_clust$cluster)
+```
+
+# Writing output
+```{r}
+path1 <- "/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Human QC/"
+path2 <- paste0(path1, samplename, "_QC.rds")
+# saveRDS(sce, file = path2)
+```
+
+

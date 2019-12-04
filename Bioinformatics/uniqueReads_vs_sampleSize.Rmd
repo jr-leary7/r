@@ -1,0 +1,288 @@
+---
+title: "Unique Read Pairs - The Quest for 60,000,000"
+author: "Jack Leary"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: paper
+    highlight: tango
+---
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(plotly)
+library(MASS)
+library(dplyr)
+library(mlmRev)
+library(lme4)
+```
+
+### Predicting unique read pairs using sample size and input size
+```{r eaton92, echo=TRUE, results='hide', echo=FALSE}
+eaton92 <- read_xlsx("/Volumes/Home/Jen Jen Yeh Lab/Chong/German_samples_QC/German Library Prep Tracking eaton92.xlsx")
+eaton92$READ_PAIR_OPTICAL_UNIQUE = eaton92$READ_PAIRS_EXAMINED_eaton92 - eaton92$READ_PAIR_OPTICAL_DUPLICATES
+eaton92$READ_PAIR_OPTICAL_UNIQUE_RATIO = eaton92$READ_PAIR_OPTICAL_UNIQUE / eaton92$READ_PAIRS_EXAMINED_eaton92
+eaton92 <- eaton92[, c(1, 2, 9, 21:24)]
+colnames(eaton92) <- c("sample", "sampleID", "input", "readPairsExamined", 
+                       "readPairOpticalDuplicates", "readPairOpticalUnique", 
+                       "readpairOpticalUniqueRatio")
+eaton92 <- na.omit(eaton92)
+eaton92$sampleSize <- rep(1/12, times = 11)
+```
+
+```{r eaton93, echo=TRUE, results='hide', echo=FALSE}
+eaton93Samp <- read_xlsx("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/eaton93/eaton93 sample info.xlsx")
+eaton93 <- read.table("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/salmon/multiqc/eaton93/multiqc_data/multiqc_picard_dups.txt", header = TRUE)
+eaton93 <- cbind(eaton93Samp, eaton93)
+eaton93$READ_PAIR_OPTICAL_UNIQUE = eaton93$READ_PAIRS_EXAMINED - eaton93$READ_PAIR_OPTICAL_DUPLICATES
+eaton93$READ_PAIR_OPTICAL_UNIQUE_RATIO = eaton93$READ_PAIR_OPTICAL_UNIQUE / eaton93$READ_PAIRS_EXAMINED
+eaton93 <- eaton93[, c(1, 2, 8, 19, 24, 27, 28)]
+eaton93$sampleSize <- rep(1/2, times = 2)
+colnames(eaton93) <- c("sample", "sampleID", "input", "readPairsExamined", 
+                       "readPairOpticalDuplicates", "readPairOpticalUnique", 
+                       "readpairOpticalUniqueRatio", "sampleSize")
+eaton93 <- eaton93[, c(1, 3, 6, 8)]
+```
+
+```{r eaton95, echo=FALSE}
+eaton95Samp <- read_xlsx("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/eaton95/German Library Prep Tracking[1][1].xlsx")
+eaton95Samp <- eaton95Samp[c(3, 5, 13, 14, 21, 23, 36, 41), ]
+eaton95Samp[, 1] <- c("Germ_36", "Germ_38", "Germ_51", "Germ_53", "Germ_64", "Germ_69", "Germ_232", "Germ_240")
+eaton95Samp <- eaton95Samp[c(1:5, 7, 8), ]
+eaton95 <- read.table("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/salmon/multiqc/eaton95/multiqc_data/multiqc_picard_dups.txt", header = TRUE)
+eaton95[, 1] <- c("Germ_232", "Germ_240", "Germ_36", "Germ_38", "Germ_51", "Germ_53", "Germ_64")
+eaton95$READ_PAIR_OPTICAL_UNIQUE = eaton95$READ_PAIRS_EXAMINED - eaton95$READ_PAIR_OPTICAL_DUPLICATES
+eaton95$READ_PAIR_OPTICAL_UNIQUE_RATIO = eaton95$READ_PAIR_OPTICAL_UNIQUE / eaton95$READ_PAIRS_EXAMINED
+eaton95 <- eaton95[c(3:8, 1, 2), ]
+eaton95 <- na.omit(eaton95)
+eaton95Full <- left_join(eaton95, eaton95Samp, by = "Sample")
+eaton95Full <- eaton95Full[, c(1, 12, 21)]
+eaton95Full$sampleSize <- rep(1/8, times = 7)
+eaton95Full <- eaton95Full[, c(1, 3, 2, 4)]
+eaton92 <- eaton92[, c(1, 3, 6, 8)]
+colnames(eaton95Full) <- colnames(eaton92)
+eatonFull <- rbind(eaton92, eaton93, eaton95Full)
+eatonNoOut <- rbind(eaton92, eaton95Full)
+```
+
+This plot shows a simple linear regression of input on unique read pairs. There appears to be a positive, weak relationship between input size and amount of unique read pairs.
+```{r dataPrep, warning=FALSE, message=FALSE, echo=FALSE}
+p1 <- ggplot(data = eatonNoOut) +
+  geom_point(mapping = aes(x = input, y = readPairOpticalUnique)) +
+  geom_smooth(mapping = aes(x = input, y = readPairOpticalUnique), 
+              method = "lm", se = FALSE, colour = "dodgerblue") +
+  ggtitle("eaton92 and eaton95") +
+  xlab("Input") + 
+  ylab("Unique Read Pairs") +
+  theme_minimal()
+ggplotly(p1)
+```
+
+This plot shows another simple linear regression of sample size on unique read pairs. There seems to be a strong, positive relationship between higher sample size (which in this case unintuitively means that the number of samples is smaller) and more unique read pairs.
+```{r, echo=FALSE}
+p2 <- ggplot(data = eatonNoOut) +
+  geom_point(mapping = aes(x = sampleSize, y = readPairOpticalUnique)) +
+  geom_smooth(mapping = aes(x = sampleSize, y = readPairOpticalUnique), 
+              method = "lm", se = FALSE, colour = "dodgerblue") +
+  ggtitle("eaton92 and eaton95") +
+  xlab("Sample Size") + 
+  ylab("Unique Read Pairs") +
+  theme_minimal()
+ggplotly(p2)
+```
+
+This simple test shows that are data are *overdispersed*, or the variance of the response variable is greater than it's mean. This often occurs when the mean is very large, as is the case with our data.
+```{r}
+var(eatonNoOut$readPairOpticalUnique) > mean(eatonNoOut$readPairOpticalUnique)
+var(eatonNoOut$readPairOpticalUnique) - mean(eatonNoOut$readPairOpticalUnique)
+```
+
+Since the data are overdispersed, it is appropriate to use either a negative binomial or quasipoisson model.
+```{r model}
+glm1 <- glm.nb(readPairOpticalUnique ~ input + sampleSize, data = eatonNoOut, control = glm.control(maxit = 50))
+
+glm2 <- glm(readPairOpticalUnique ~ input + sampleSize, data = eatonNoOut, family = "quasipoisson")
+```
+
+From each model's summary statistics, we can see that sample size is a highly significant predictor, and input size is significant at the $\alpha = .05$ level in both the negative binomial and quasipoisson regressions.
+```{r}
+summary(glm1)
+summary(glm2)
+```
+
+```{r mixedModel, include=FALSE, warning=FALSE}
+mm1 <- glmer.nb(readPairOpticalUnique ~ input + (1 | sampleSize), data = eatonNoOut)
+summary(mm1)
+```
+
+We can see from the diagnostic plots that the two models have very similar fits. The residual vs. fitted plots for both are about as good as can be expected. Since the two fits are so similar, their predictions should be about the same.
+```{r diagnosticPlots}
+plot(glm1, which = c(1, 2, 5))
+plot(glm2, which = c(1, 2, 5))
+```
+
+The coefficients for each model are very similar, with both input and sample size having positive effects on the amount of unique read pairs. The coefficients of a negative binomial GLM are interpreted as such: for a one unit change in the predictor variable (all other predictors held constant), the log of expected counts of the response variable is expected to change by the predictor's coefficient. Input is easy to interpret, while sample size is less so, since sample size is a fraction that will never rise above 1. But, since both coefficients are positive, we can conclude that increasing both input and increasing sample size (which again means that the actual number of samples on the flowcell is smaller) will increase the amount of unique read pairs.
+```{r coefficients}
+nbCoef <- coef(glm1)
+nbCoefExp <- exp(nbCoef)
+qpCoef <- coef(glm2)
+qpCoefExp <- exp(qpCoef)
+
+nbCoefExp
+qpCoefExp
+```
+
+Here we'll compare different sample and input sizes from the predictions generated by the negative binomial GLM.
+```{r negBin}
+sampSizes <- c(6:9)
+inputSizes <- seq(from = 50, to = 600, by = 50)
+
+predIntervals <- data.frame("input" = NA, "sampleSize" = NA, "upper" = NA, "lower" = NA, "mean" = NA)
+
+q <- list()
+u <- 1
+while(u <= 36) {
+  for(i in seq_along(sampSizes)) {
+    for(j in seq_along(inputSizes)) {
+    testDF <- data.frame("input" = inputSizes[j], "sampleSize" = (1 / sampSizes[i]))
+    pointEst <- predict(glm1, testDF)
+    pointEst <- exp(pointEst)
+    p <- predict(glm1, testDF, type = "link", se.fit = TRUE)
+    upNum <- exp(p[[1]] + 1.96 * p[[2]])
+    downNum <- exp(p[[1]] - 1.96 * p[[2]])
+    q[[u]] <- list(inputSizes[j], sampSizes[i], upNum[[1]], downNum[[1]], pointEst[[1]])
+    predIntervals[u, ] <- q[[u]]
+    u <- u + 1
+    }
+  }
+}
+
+six <- subset(predIntervals, predIntervals$sampleSize == 6)
+seven <- subset(predIntervals, predIntervals$sampleSize == 7)
+eight <- subset(predIntervals, predIntervals$sampleSize == 8)
+nine <- subset(predIntervals, predIntervals$sampleSize == 9)
+```
+
+The following three graphs show, for different sample sizes, a 95% prediction interval generated by the negative binomial GLM for the number of unique read pairs generated by different input sizes. The green line on each plot is set at $y = 60,000,000$, the safe lower bound we want to stay above. We can interpret the prediction intervals like this: for each new sample/input pairing, we can be 97.5% sure that the number of unique read pairs observed will fall above the red line. Since these plots are interactive, it's easy to make sure whether a given sample size and input size combination will most likely fall in the safe area or not.
+```{r, echo=FALSE}
+plotSix <- ggplot(six) + 
+  geom_point(aes(x = input, y = mean), color = "grey") +
+  geom_line(aes(x = input, y = mean), color = "grey") +
+  geom_point(aes(x = input, y = upper), color = "blue") +
+  geom_line(aes(x = input, y = upper), color = "blue") +
+  geom_point(aes(x = input, y = lower), color = "red") +
+  geom_line(aes(x = input, y = lower), color = "red") +
+  theme_minimal() +
+  geom_hline(yintercept = 60000000, color = "darkgreen") +
+  xlab("Input Size") + 
+  ylab("Unique Read Pairs") +
+  ggtitle("Sample Size = 6")
+ggplotly(plotSix)
+```
+
+```{r, echo=FALSE}
+plotSeven <- ggplot(seven) + 
+  geom_point(aes(x = input, y = mean), color = "grey") +
+  geom_line(aes(x = input, y = mean), color = "grey") +
+  geom_point(aes(x = input, y = upper), color = "blue") +
+  geom_line(aes(x = input, y = upper), color = "blue") +
+  geom_point(aes(x = input, y = lower), color = "red") +
+  geom_line(aes(x = input, y = lower), color = "red") +
+  theme_minimal() +
+  geom_hline(yintercept = 60000000, color = "darkgreen") +
+  xlab("Input Size") + 
+  ylab("Unique Read Pairs") +
+  ggtitle("Sample Size = 7")
+ggplotly(plotSeven)
+```
+
+```{r, echo=FALSE}
+plotEight <- ggplot(eight) + 
+  geom_point(aes(x = input, y = mean), color = "grey") +
+  geom_line(aes(x = input, y = mean), color = "grey") +
+  geom_point(aes(x = input, y = upper), color = "blue") +
+  geom_line(aes(x = input, y = upper), color = "blue") +
+  geom_point(aes(x = input, y = lower), color = "red") +
+  geom_line(aes(x = input, y = lower), color = "red") +
+  theme_minimal() +
+  geom_hline(yintercept = 60000000, color = "darkgreen") +
+  xlab("Input Size") + 
+  ylab("Unique Read Pairs") + 
+  ggtitle("Sample Size = 8")
+ggplotly(plotEight)
+```
+
+```{r, echo=FALSE}
+plotNine <- ggplot(nine) + 
+  geom_point(aes(x = input, y = mean), color = "grey") +
+  geom_line(aes(x = input, y = mean), color = "grey") +
+  geom_point(aes(x = input, y = upper), color = "blue") +
+  geom_line(aes(x = input, y = upper), color = "blue") +
+  geom_point(aes(x = input, y = lower), color = "red") +
+  geom_line(aes(x = input, y = lower), color = "red") +
+  theme_minimal() +
+  geom_hline(yintercept = 60000000, color = "darkgreen") +
+  xlab("Input Size") + 
+  ylab("Unique Read Pairs") + 
+  ggtitle("Sample Size = 9")
+ggplotly(plotNine)
+```
+
+### Predicting unique read pairs with examined read pairs
+```{r readPairs, echo=FALSE}
+eaton92 <- read_xlsx("/Volumes/Home/Jen Jen Yeh Lab/Chong/German_samples_QC/German Library Prep Tracking eaton92.xlsx")
+eaton92$READ_PAIR_OPTICAL_UNIQUE = eaton92$READ_PAIRS_EXAMINED_eaton92 - eaton92$READ_PAIR_OPTICAL_DUPLICATES
+eaton92$READ_PAIR_OPTICAL_UNIQUE_RATIO = eaton92$READ_PAIR_OPTICAL_UNIQUE / eaton92$READ_PAIRS_EXAMINED_eaton92
+eaton92 <- eaton92[, c(1, 9, 21, 23)]
+eaton92 <- na.omit(eaton92)
+
+eaton93Samp <- read_xlsx("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/eaton93/eaton93 sample info.xlsx")
+eaton93 <- read.table("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/salmon/multiqc/eaton93/multiqc_data/multiqc_picard_dups.txt", header = TRUE)
+eaton93 <- cbind(eaton93Samp, eaton93)
+eaton93$READ_PAIR_OPTICAL_UNIQUE = eaton93$READ_PAIRS_EXAMINED - eaton93$READ_PAIR_OPTICAL_DUPLICATES
+eaton93$READ_PAIR_OPTICAL_UNIQUE_RATIO = eaton93$READ_PAIR_OPTICAL_UNIQUE / eaton93$READ_PAIRS_EXAMINED
+eaton93 <- eaton93[, c(1, 8, 19, 27)]
+
+eaton95Samp <- read_xlsx("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/eaton95/German Library Prep Tracking[1][1].xlsx")
+eaton95Samp <- eaton95Samp[c(3, 5, 13, 14, 21, 23, 36, 41), ]
+eaton95Samp[, 1] <- c("Germ_36", "Germ_38", "Germ_51", "Germ_53", "Germ_64", "Germ_69", "Germ_232", "Germ_240")
+eaton95Samp <- eaton95Samp[, c(1, 9)]
+eaton95Samp <- eaton95Samp[-6, ]
+eaton95 <- read.table("/Volumes/Home/Jen Jen Yeh Lab/RNAseq/salmon/multiqc/eaton95/multiqc_data/multiqc_picard_dups.txt", header = TRUE)
+eaton95[, 1] <- c("Germ_232", "Germ_240", "Germ_36", "Germ_38", "Germ_51", "Germ_53", "Germ_64")
+eaton95 <- eaton95[c(3:8, 1, 2), ]
+eaton95 <- na.omit(eaton95)
+eaton95$READ_PAIR_OPTICAL_UNIQUE = eaton95$READ_PAIRS_EXAMINED - eaton95$READ_PAIR_OPTICAL_DUPLICATES
+eaton95$READ_PAIR_OPTICAL_UNIQUE_RATIO = eaton95$READ_PAIR_OPTICAL_UNIQUE / eaton95$READ_PAIRS_EXAMINED
+eaton95 <- eaton95[, c(1, 5, 12)]
+eaton95Full <- left_join(eaton95Samp, eaton95, by = "Sample")
+colnames(eaton92) <- colnames(eaton95Full)
+eatonFull <- rbind(eaton95Full, eaton92)
+```
+
+This simple linear regression of unique read pairs on examined read pairs seems to fit well, so such a model should adequately explain the relationship.
+```{r, echo=FALSE}
+p7 <- ggplot(data = eatonFull) +
+  geom_point(mapping = aes(x = READ_PAIRS_EXAMINED, y = READ_PAIR_OPTICAL_UNIQUE)) +
+  geom_smooth(mapping = aes(x = READ_PAIRS_EXAMINED, y = READ_PAIR_OPTICAL_UNIQUE), 
+              method = "lm", se = FALSE, colour = "dodgerblue") +
+  ggtitle("Predicting Unique Read Pairs Using SLR") +
+  xlab("Read Pairs Examined") + 
+  ylab("Unique Read Pairs") +
+  theme_minimal()
+ggplotly(p7)
+```
+
+The coefficients of a linear model are (thankfully) easier to interpret than those of a GLM. The coefficient corresponding to the number of examined read pairs in 1.376. This means that a one unit increase in examined read pairs should lead to a 1.376 unit increase in unique read pairs. This effect is highly significant at the $\alpha = 10^{-15}$ level.
+```{r model2}
+lm1 <- lm(READ_PAIR_OPTICAL_UNIQUE ~ READ_PAIRS_EXAMINED, data = eatonFull)
+summary(lm1)
+```
+
+Using the coefficients from the linear model, we can predict how many unique read pairs we'll get for a certain number of examined read pairs. According to the model, examining 60,000,000 reads will yield 54,620,162 unique reads.
+```{r predictions}
+test <- data.frame("READ_PAIRS_EXAMINED" = 60000000)
+p <- predict(lm1, test)
+p
+```

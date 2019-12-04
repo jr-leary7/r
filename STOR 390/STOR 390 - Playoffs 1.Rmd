@@ -1,0 +1,284 @@
+---
+title: "Playoffs Round 1 -- Fencing"
+author: "Jack Leary, Michael Bono, Lindsey Nelson, Alex Matthew, Daniel Edmonds"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: paper
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    
+---
+# Libraries
+```{r libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(plotly)
+library(wesanderson)
+```
+
+# Data Import and Cleaning
+```{r data1, warning=FALSE, message=FALSE, error=FALSE}
+fencing_master <- read.csv("/Users/Jack/Downloads/Fencing Data - Copy of master.csv", 
+                           stringsAsFactors = FALSE, 
+                           col.names = c("left_fencer", "left_gender", "right_fencer", 
+                                         "right_gender", "left_handedness", "right_handedness", 
+                                         "final_location", "line_left", "line_right", 
+                                         "call", "right_of_way", "time_elapsed", "score_left_start", 
+                                         "score_right_start", "touch_awarded"))
+fencing_master <- fencing_master[-c(10, 24, 33, 46, 56), ]
+
+
+for (i in seq(nrow(fencing_master))) {
+  for (j in seq(ncol(fencing_master))) {
+    if (fencing_master[i, j] == "N/A" | fencing_master[i, j] == "n/A") {
+      fencing_master[i, j] <- NA
+    }
+  }
+  if (fencing_master$final_location[i] == "centr" | fencing_master$final_location[i] == "Centr" | fencing_master$final_location[i] == "cetner" | fencing_master$final_location[i] == "Cetner") {
+    fencing_master$final_location[i] <- "center"
+  }
+  if (fencing_master$call[i] == "Similtaneous") {
+    fencing_master$call[i] <- "Simultaneous"
+  } 
+}
+
+for (i in seq(nrow(fencing_master))) {
+  for (j in c(1:11, 15)) {
+    fencing_master[i, j] <- toupper(fencing_master[i, j])
+  }
+}
+
+
+alex_df <- fencing_master[fencing_master$left_fencer == "ALEX" | fencing_master$right_fencer == "ALEX", ]
+```
+## Introduction
+Fencing is a combat sport involving two competitors whose goal is to touch their opponent in a target area of the body with their saber. Fencing is actually a combination of three styles of “sword fighting” foil, epee, and saber. This study will focus on the saber style of competition. We decided to carry out our study on Fencing because our team member Alex is a member of the Varsity fencing team and could give us access to data and insight on the sport. We initially wanted to create a player efficiency model that would allow us to compare different players efficiencies to predict win percentage. We wanted to look for factors correlated with won points and successful fencers.  With the data we were able to gather it was not feasible to create such a model. Our team was still able to draw interesting insights. 
+
+Our team was able to attend a UNC Varsity Fencing Team practice in the Fencing Practice Facility located in the basement of Fetzer Gym. During a practice on October 8th we observed one match that was being scored as the first to 5 wins. Each of us were responsible for recording a couple pieces of data after the conclusion of each touch. Because of the speed of the sport our group also began to video the matches so we could look at each point later and glean the statistics that way. 
+
+### Data Description
+Each row of the data represents one fencing play of the matches that we observed. We recorded each fencer’s name and start position on the strip with the variables Left Fencer and Right Fencer. We also recorded the gender and handedness of each player with the variables  Left/Right Gender and Left/Right Handedness. The final action location, where the touch occurred on the strip, of each play is also recorded as the variable Final Location. The target or line of each player is also recorded as the variables Left/Right Line. The line or target is the part of the target area that each fencer is trying to touch. The outcome of each play is recorded through the variable Call which was determined by a referee. We recorded the time elapsed during each point with the variable Time Elapsed. Score was kept using the variables Score At Start Left/Right which indicate both players number of points at the beginning of the point. The Touch Awarded variable records the name of the fencer that the touch was awarded to or if no touch was awarded during this play. 
+```{r data2}
+head(fencing_master, 5)
+```
+
+
+# Summary Statistics
+This table shows the frequency of each of the responses of our variables. Since we primarily have categorical variables, we opted to use a frequency table to provide a thorough representation of our data. This table covers both the frequencies and relative frequencies of gender, handedness, location, targets, calls, and time elapsed (binary variable with 0 = short period and 1 =  long period).
+```{r summary}
+male_freq <- round((sum(fencing_master$left_gender == "M") + sum(fencing_master$right_gender == "M")) / 10)
+female_freq <- round((sum(fencing_master$left_gender == "F") + sum(fencing_master$right_gender == "F")) / 10)
+male_rel <- male_freq / (male_freq + female_freq)
+female_rel <- 1 - male_rel
+
+
+right_freq <- 11.00
+right_rel <- 1.00
+left_freq <- 0.00
+left_rel <- left_freq
+
+
+call_df <- fencing_master %>% 
+  group_by(call) %>% 
+  summarise(freq = length(call))
+call_df$rel_freq <- call_df$freq / sum(call_df$freq)
+
+
+loc_df <- fencing_master %>% 
+  group_by(final_location) %>% 
+  summarise(freq = length(final_location))
+loc_df$rel_freq <- loc_df$freq / sum(loc_df$freq)
+
+
+line_left_df <- fencing_master %>% 
+  group_by(line_left) %>% 
+  summarise(freq1 = length(line_left))
+colnames(line_left_df)[1] <- "line"
+line_left_df <- na.omit(line_left_df)
+
+line_right_df <-fencing_master %>% 
+  group_by(line_right) %>% 
+  summarise(freq2 = length(line_right))
+colnames(line_right_df)[1] <- "line"
+line_right_df <- na.omit(line_right_df)
+
+line_df <- left_join(line_left_df, line_right_df, by = "line")
+line_df$freq <- line_df$freq1 + line_df$freq2
+line_df$rel_freq <- line_df$freq / sum(line_df$freq)
+
+
+long_freq <- sum(fencing_master$time_elapsed == 1)
+short_freq <- sum(fencing_master$time_elapsed == 0)
+long_rel <- long_freq / (long_freq + short_freq)
+short_rel <- 1 - long_rel
+
+
+freq_list <- c(male_freq, female_freq, right_freq, left_freq, call_df$freq, loc_df$freq, 
+               line_df$freq, long_freq, short_freq)
+rel_freq_list <- c(male_rel, female_rel, right_rel, left_rel, call_df$rel_freq, loc_df$rel_freq, 
+                   line_df$rel_freq, long_rel, short_rel)
+col_names <- c("male", "female", "right", "left", call_df$call, loc_df$final_location, 
+               line_df$line, "time_long", "time_short")
+col_names <- tolower(col_names)
+
+
+summary_df <- data.frame(freq_list, rel_freq_list)
+summary_df <- t(summary_df)
+colnames(summary_df) <- col_names
+rownames(summary_df) <- c("Frequency", "Relative Frequency")
+summary_df <- round(summary_df, 2)
+summary_df <- as.data.frame(summary_df)
+summary_df
+```
+
+# Exploratory Visualization
+## Call Frequency by Final Location
+Diving more in the frequencies of responses we chose to illustrate the relationship between location on the strip and what calls are being made by the referee. This visual shows how often certain calls were made when the event occurred on the left, center, or right portion of the fencing strip. 
+```{r visualization}
+p1 <- ggplot(fencing_master, mapping = aes(x = final_location)) +
+  geom_bar(fill = wes_palette(name = "Darjeeling1", type = "discrete")[5]) + 
+  theme_minimal() + 
+  xlab("Final Location") +
+  ylab("Frequency") +
+  ggtitle("Frequency of Final Locations")
+
+p2 <- ggplot(fencing_master, mapping = aes(x = call)) +
+  geom_bar(fill = wes_palette(name = "Darjeeling1", type = "discrete")[5]) +
+  theme_minimal() +
+  xlab("Call") +
+  ylab("Frequency") +
+  ggtitle("Frequency of Calls") + 
+  theme(axis.text.x = element_text(angle = 45))
+
+p3 <- ggplot(fencing_master, mapping = aes(x = call)) +
+  geom_bar(aes(fill = final_location)) +
+  theme_minimal() +
+  xlab("Calls Sorted by Final Location") +
+  ylab("Frequency") +
+  ggtitle("Frequency of Calls by Location") +
+  theme(axis.text.x = element_text(angle = 45)) + 
+  labs(fill = "Final Location")
+ggplotly(p3)
+```
+
+## Final Location Frequency by Touch Type
+To gain a more telling insight, our group decided to explore the relationship of the touch type for left side and right side fencers in relation to what portion of the strip the play occurred in. These two visuals demonstrate whether or not the portion of the strip influences the left and right fencers’ touch type. It also provides a comparison for the two sides to see if one is more likely to do a certain type of touch or touch in a certain part of the strip.
+```{r}
+touch_df <- fencing_master[, c(7:10)]
+touch_right <- touch_df[, c(1, 3, 4)]
+touch_right <- na.omit(touch_right)
+touch_left <- touch_df[, c(1, 2, 4)]
+touch_left <- na.omit(touch_left)
+
+p5 <- ggplot(touch_left, mapping = aes(x = final_location)) +
+  geom_bar(aes(fill = line_left)) +
+  theme_minimal() +
+  xlab("Final Location") +
+  ylab("Frequency") +
+  ggtitle("Frequency of Final Locations by Touch Type for Left Fencer") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(fill = "Touch Type")
+ggplotly(p5)
+
+p6 <- ggplot(touch_right, mapping = aes(x = final_location)) +
+  geom_bar(aes(fill = line_right)) +
+  theme_minimal() +
+  xlab("Final Location") +
+  ylab("Frequency") +
+  ggtitle("Frequency of Final Locations by Touch Type for Right Fencer") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(fill = "Touch Type")
+ggplotly(p6)
+```
+
+# Insights
+## Touch Type Frequencies
+Here we can see that the head is the most common place for a fencer to be struck, followed by the right arm and wrist. This makes sense since most fencers go for the head, but when they do so they expose their striking wrist and arm to a counterattack. Since all of our fencers were right-handed, it follows that the right arm was struck more often than the left. 
+```{r insights1}
+p7 <- ggplot(line_df, mapping = aes(x = line, y = rel_freq)) +
+    geom_bar(stat = "identity", fill = wes_palette(name = "Darjeeling1", type = "discrete")[5]) +
+    theme_minimal() +
+    xlab("Touch Type") +
+    ylab("Relative Frequency") +
+    theme(axis.text.x = element_text(angle = 45))
+ggplotly(p7)
+```
+
+## Alex's Efficiency
+Here we'll compute efficiency statistics for the fencer in our group, Alex Matthew. Defensive efficiency is quantified as the percentage of time that a player is awarded a touch after having been pushed back to their side of the strip. Offensive efficiency is the percentage of the time that said player is awarded a touch on after pushing their opponent to their side of the strip. We can see that when the action ended on Alex's side of the strip, he ended up scoring 20% of the time. This is contrasted with the 60% of the time that he scored on his opponent after pushing them to their side. These percentages suggest that Alex's opponents might have been slightly better defensive players than him, although the sample sizes are too small to draw any significant conclusions.
+```{r insights2}
+pushed_back <- alex_df[alex_df$final_location == "LEFT", ]  # 10 obvs
+no_clutch_move <- pushed_back[pushed_back$touch_awarded != "ALEX", ]  # 8 obvs
+defense_eff <- 1 - nrow(no_clutch_move) / nrow(pushed_back)
+defense_eff
+
+pushed_forward <- alex_df[alex_df$final_location == "RIGHT", ]  # 5 obvs
+alex_point <- pushed_forward[pushed_forward$touch_awarded == "ALEX", ]  # 3 obvs
+offense_eff <- nrow(alex_point) / nrow(pushed_forward)
+offense_eff
+```
+
+## General Efficiency
+Here we can see that using the same defensive efficiency metrics used above that average defensive efficiency is 25% and average offensive efficiency is 70%. These results show that to efficiently score on your opponent, it's a good idea to try and push them back into their section of the strip.
+```{r insights3}
+fencing_master1 <- subset(fencing_master, !is.na(fencing_master$touch_awarded))
+pushed_back_left <- fencing_master1[fencing_master1$final_location == "LEFT", ]
+pushed_back_right <- fencing_master1[fencing_master1$final_location == "RIGHT", ]
+no_clutch_move_left <- pushed_back_left[pushed_back_left$touch_awarded != pushed_back_left$left_fencer, ]
+no_clutch_move_right <- pushed_back_right[pushed_back_right$touch_awarded != pushed_back_right$right_fencer, ]
+defense_eff_avg <- 1 - sum(nrow(no_clutch_move_left) + nrow(no_clutch_move_right)) / sum(nrow(pushed_back_left) +
+                                                                                           nrow(pushed_back_right))
+defense_eff_avg
+
+pushed_forward_left <- fencing_master1[fencing_master1$final_location == "RIGHT", ]
+pushed_forward_right <- fencing_master1[fencing_master1$final_location == "LEFT", ]
+left_point <- pushed_forward_left[pushed_forward_left$left_fencer == pushed_forward_left$touch_awarded, ]
+right_point <- pushed_forward_right[pushed_forward_right$right_fencer == pushed_forward_right$touch_awarded, ]
+offense_eff_avg <- sum(nrow(left_point) + nrow(right_point)) / sum(nrow(pushed_forward_left) + 
+                                                                     nrow(pushed_forward_right))
+offense_eff_avg
+```
+
+## Touch Locations on Offense
+We can quantify being on attack as having had the right of way when the touch was awarded. From our data, attackers most frequently hit the right arm and head. A possible insight to be gleaned from this information would be to move to block those areas specifically before counterattacking when on defense. 
+```{r ROW}
+## pair ROW with whether fencer was left or right
+#### need to be able to match right of way with a hit
+right_of_way <- subset(fencing_master, !is.na(fencing_master$right_of_way))
+fencer <- list()
+touch <- list()
+for (i in seq(nrow(right_of_way))) {
+  rway_name <- right_of_way$right_of_way[i]
+  fencer[[i]] <- rway_name
+  if (rway_name == right_of_way$left_fencer[i]) {
+    touch[[i]] <- right_of_way$line_left[i]
+  } else {
+    touch[[i]] <- right_of_way$line_right[i]
+  }
+}
+fencer <- unlist(fencer)
+touch <- unlist(touch)
+attack_df <- data.frame(fencer, touch)
+attack_df <- na.omit(attack_df)
+
+p8 <- ggplot(attack_df, mapping = aes(x = touch)) +
+  geom_bar(fill = wes_palette(name = "Darjeeling1", type = "discrete")[5]) +
+  theme_minimal() + 
+  xlab("Touch Type") +
+  ylab("Frequency") +
+  ggtitle("Touch Type Frequencies for Attackers") +
+  theme(axis.text.x = element_text(angle = 45))
+ggplotly(p8)
+```
+
+
+# Critiques
+If this project were to be continued or redone, we would have elected to gather data a bit differently. Because fencing is such a fast sport, our group had trouble recording data. Even when we videotaped and replayed these matches, it was still difficult to catch some of the quick moves the fencers made. If we were able to redo this analysis with unlimited resources, we would use high-speed cameras and motion capture technology to help us not only find the exact times of matches, but also the speed of fencers and the exact locations of touches.
+
+Additionally, due to the nature of the sport of fencing, many of our variables were categorical. This limited our numerical analysis, but still allowed us to make insights on specific players. In the future, some additional numerical data that we would like to record may include individual fencer characteristics (such as height and arm length), the number of times the “right of way” changed in a single fencing match, exact length in seconds per match, exact distance from the center of the pitch, and speed of fencers. Beyond that, one drawback in our categorical we noticed after data collection was that while we recorded data for touches on the left vs. right arms, we recorded touches on the wrist simply as "wrist" without specifying a side. Furthermore, we would also like to focus on data below the “touch” level. While in this project we focused primarily on the point that is scored, where it is scored, and who scored it, we would like to continue to look at other data that happens during the match, such as the amount of movement back and forth on the pitch, the number of blocks or parries, and other strategic decisions.
+
+Finally, we would also like to simply collect more data overall. Though we have a lot of play-by-play data, it does not cover very many fencers or matches. More data would allow us to draw additional insights as well as help predict outcomes of matches. Overall, this project went well and our group was able to draw interesting insights from the data we collected.
+

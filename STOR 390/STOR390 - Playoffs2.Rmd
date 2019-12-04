@@ -1,0 +1,530 @@
+---
+title: "STOR 390 - Playoffs 2"
+author: "Jack Leary, Gabe Stocker, Will Buisson, Kirsten Freeman, Ethan Rodgers"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    highlight: tango
+    theme: paper
+    toc: true
+    toc_depth: 3
+    code_folding: hide
+    df_print: paged
+---
+
+# Libraries
+```{r libraries, warning=FALSE, message=FALSE}
+library(tidyverse)  # data manipulation, ggplot2
+library(rvest)  # web scraping
+library(lubridate)  # date manipulation
+library(e1071)  # SVMs
+library(randomForest)  # random forests
+library(plotly)  # interactive graphs
+library(caret)  # tuning parameters
+library(glmnet)  # tuning parameters
+library(xgboost)  # extreme gradient boosting
+library(ANN2)  # artificial neural nets
+library(Cubist)  # cubist regression
+library(uwot)  # UMAP dimension reduction
+library(Rtsne)  # t-distributed stochastic neighbors embedding
+library(dbscan)  # density based clustering w/ noise
+library(MASS)  # LASSO
+library(gbm)  # gradient boosting machines
+```
+
+# Data
+## Provided Data
+This is the data that was provided to use by Cleat Street.
+```{r import1}
+game_results <- read.csv("/Users/Jack/Documents/My-Projects/STOR390 Playoffs2/Data/GameResults.csv",
+                         stringsAsFactors = FALSE)
+game_stats <- read.csv("/Users/Jack/Documents/My-Projects/STOR390 Playoffs2/Data/GameStats.csv",
+                       stringsAsFactors = FALSE)
+game_predictions <- read.csv("/Users/Jack/Documents/My-Projects/STOR390 Playoffs2/Data/Predictions.csv",
+                             stringsAsFactors = FALSE)
+game_results <- distinct(game_results)  # removes duplicate rows
+game_results$Year <- rep(NA, nrow(game_results))
+for (i in seq(nrow(game_results))) {
+  game_results$Year[i] <- strsplit(game_results$Season[i], "-")[[1]][1]
+}
+```
+
+## Supplementary Data
+In this section we scrape season-long offensive and defensive statistics for each team to add to the provided data.
+```{r import2}
+dates <- c("2015", "2016", "2017", "2018", "2019")
+off_list <- list()
+def_list <- list()
+for (i in seq(dates)) {
+  off_df <- paste0("https://www.sports-reference.com/cfb/years/", 
+                    dates[i], 
+                    "-team-offense.html") %>% 
+    read_html() %>% 
+    html_table(fill = TRUE, header = TRUE) %>% 
+    .[[1]]
+  names(off_df) <- c(off_df[1, ])
+  off_df$Year <- dates[i]
+  colnames(off_df) <- c("Rk", "School", "Game", "Points", "Pass_Cmp", "Pass_Att", "Pass_Pct", 
+                        "Pass_Yds", "Pass_TD", "Rush_Att", "Rush_Yds", "Rush_Avg", 
+                        "Rush_TD", "Total_Plays", "Total_Yds", "Total_YdsPlay", 
+                        "Pass_1D", "Rush_1D", "Pen_1D", "Tot_1D", "Tot_Pen",
+                        "Pen_Yds", "Fum_pGame", "Int_pGame", "TO_pGame", "Year")
+  
+  def_df <- paste0("https://www.sports-reference.com/cfb/years/", 
+                    dates[i], 
+                    "-team-defense.html") %>% 
+    read_html() %>% 
+    html_table(fill = TRUE, header = TRUE) %>% 
+    .[[1]]
+  names(def_df) <- c(def_df[1, ])
+  def_df$Year <- dates[i]
+  colnames(def_df) <- c("Rk", "School", "Game", "Points", "Pass_Cmp", "Pass_Att", "Pass_Pct", 
+                        "Pass_Yds", "Pass_TD", "Rush_Att", "Rush_Yds", "Rush_Avg", 
+                        "Rush_TD", "Total_Plays", "Total_Yds", "Total_YdsPlay", 
+                        "Pass_1D", "Rush_1D", "Pen_1D", "Tot_1D", "Tot_Pen",
+                        "Pen_Yds", "Fum_pGame", "Int_pGame", "TO_pGame", "Year")
+  
+  # remove additional header rows in dataframes
+  for (j in seq(nrow(off_df))) {
+    if (grepl("P", off_df$Pass_Pct[j])) {
+      off_df <- off_df[-j, ]
+    }
+  }
+  for (j in seq(nrow(def_df))) {
+    if (grepl("P", def_df$Pass_Pct[j])) {
+      def_df <- def_df[-j, ]
+    }
+  }
+  
+  off_list[[i]] <- off_df
+  def_list[[i]] <- def_df
+}
+```
+
+Here we scrape strength of schedule ratings for each team.
+```{r}
+sos_list <- list()
+dates <- c("2016-01-12", "2017-01-10", "2018-01-08", "2019-01-08", "2019-11-13")
+dates1 <- c("2015", "2016", "2017", "2018", "2019")
+for (i in seq(dates)) {
+  sos_df <- paste0("https://www.teamrankings.com/college-football/ranking/schedule-strength-by-other?",
+                   "date=", dates[i]) %>% 
+    read_html() %>% 
+    html_table(fill = TRUE) %>% 
+    .[[1]]
+
+  for (j in seq(nrow(sos_df))) {
+    sos_df$Year[j] <- dates1[i]
+  }
+  
+  sos_list[[i]] <- sos_df
+}
+
+sos_full <- rbind(sos_list[[1]], sos_list[[2]], sos_list[[3]], 
+                  sos_list[[4]], sos_list[[5]])
+sos_full <- sos_full[, -c(1, 4:6)]
+
+for (i in seq(nrow(sos_full))) {
+  sos_full$Team[i] <- strsplit(sos_full$Team[i], " \\(")[[1]][1]
+}
+mean_rating <- mean(sos_full$Rating)
+min_rating <- min(sos_full$Rating)
+```
+
+## Cleaning and Merging
+### Provided Data
+Here we use a couple filtering and merging functions to create a unique row with home and away statistics for each game.
+```{r cleaning1, message=FALSE, warning=FALSE}
+stats_away <- game_stats %>% 
+  filter(X == "@")
+stats_away <- stats_away %>% 
+  rename(Visitor.Team = School) %>% 
+  rename(Home.Team = Opponent)
+stats_away <- stats_away[, -c(1, 4, 5)]
+
+stats_home <- game_stats %>% 
+  filter(X == "")
+stats_home <- stats_home %>% 
+  rename(Home.Team = School) %>% 
+  rename(Visitor.Team = Opponent)
+stats_home <- stats_home[, -c(1, 4, 5)]
+
+stats_neutral <- game_stats %>% 
+  filter(X == "N")
+
+names(stats_away)[4:ncol(stats_away)] <- paste0(rep("Away"), "_", c(names(stats_away[, 4:ncol(stats_away)])))
+game_stats_joined <- na.omit(full_join(stats_home, stats_away))
+names(game_stats_joined)[4:ncol(stats_home)] <- paste0(rep("Home"), "_", c(names(stats_home[, 4:ncol(stats_home)])))
+
+for (i in seq(nrow(game_stats_joined))) {
+  game_stats_joined$Year[i] <- strsplit(game_stats_joined$Date[i], "/")[[1]][3]
+}
+head(game_stats_joined)
+```
+
+### Supplementary Data
+The offensive and defensive supplementary stats were separated by year; we use several joining tehcniques to create one dataframe with all the information. We'll only be using the supplementary data to predict spread, total, and result.
+```{r cleaning2}
+off_complete <- rbind(off_list[[1]],
+                      off_list[[2]],
+                      off_list[[3]],
+                      off_list[[4]],
+                      off_list[[5]])
+def_complete <- rbind(def_list[[1]], 
+                      def_list[[2]],
+                      def_list[[3]],
+                      def_list[[4]],
+                      def_list[[5]])
+off_complete <- off_complete[, -1]
+def_complete <- def_complete[, -1]
+for (i in 2:25) {
+  names(off_complete)[i] <- paste0("off_", names(off_complete[i]))
+  names(def_complete)[i] <- paste0("def_", names(def_complete[i]))
+}
+
+off_complete <- subset(off_complete, off_complete$School != "School")
+off <- left_join(off_complete, sos_full, by = c("School" = "Team", 
+                                                "off_Year" = "Year"))
+def <- left_join(def_complete, sos_full, by = c("School" = "Team", 
+                                                "def_Year" = "Year"))
+off$Rating <- ifelse(is.na(off$Rating), mean_rating, off$Rating)
+def$Rating <- ifelse(is.na(def$Rating), mean_rating, def$Rating)
+
+
+home_df <- left_join(game_results, off, by = c("Home.Team" = "School", 
+                                               "Year" = "off_Year"))
+home_df1 <- left_join(home_df, def, by = c("Visitor.Team" = "School", 
+                                          "Year"= "def_Year"))
+home_df <- na.omit(home_df1)
+colnames(home_df)[36] <- "Home_Rating"
+colnames(home_df)[60] <- "Away_Rating"
+
+away_df <- left_join(game_results, off, by = c("Visitor.Team" = "School", 
+                                               "Year" = "off_Year"))
+away_df1 <- left_join(away_df, def, by = c("Home.Team" = "School", 
+                                          "Year" = "def_Year"))
+away_df <- na.omit(away_df1)
+colnames(away_df)[36] <- "Away_Rating"
+colnames(away_df)[60] <- "Home_Rating"
+
+for (i in 13:ncol(home_df)) {
+  home_df[, i] <- as.numeric(as.character(home_df[, i]))
+  away_df[, i] <- as.numeric(as.character(away_df[, i]))
+}
+```
+
+### Variable Creation
+For our proprietary variable, we decided to use the sum of the amount of scaled standard deviations above the mean for penalties and turnovers.
+```{r variable}
+home_df$our_var <- rep(NA, nrow(home_df))
+away_df$our_var <- rep(NA, nrow(away_df))
+for (i in seq(nrow(home_df))) {
+  home_df$our_var[i] <- sum(home_df$def_Tot_Pen[i], home_df$off_Tot_Pen[i],  
+                         home_df$off_Int_pGame[i], home_df$off_Fum_pGame[i])
+  away_df$our_var[i] <- sum(away_df$def_Tot_Pen[i], away_df$off_Tot_Pen[i],  
+                         away_df$off_Int_pGame[i], away_df$off_Fum_pGame[i])
+}
+home_df$our_var <- scale(home_df$our_var)
+away_df$our_var <- scale(away_df$our_var)
+
+home_df$team_year <- rep(NA, nrow(home_df))
+away_df$team_year <- rep(NA, nrow(away_df))
+
+for (i in seq(nrow(home_df))) {
+  home_df$team_year[i] <- paste0(home_df$Home.Team[i], ", " ,home_df$Year[i])
+  away_df$team_year[i] <- paste0(away_df$Home.Team[i], ", " ,away_df$Year[i])
+}
+```
+
+### Remove Collinear Variables
+```{r}
+home_df <- home_df[, -c(13, 17, 22, 26, 30, 35, 37, 41, 46, 50, 54, 59)]
+away_df <- away_df[, -c(13, 17, 22, 26, 30, 35, 37, 41, 46, 50, 54, 59)]
+```
+
+
+# Exploratory Visualization
+Here we reduce the data into three dimensions using t-distributed stochastic neighbors embedding (t-SNE) on top of 50 principal components. Next, k-means clustering is performed on the low dimensional representation of the data, with $k = 7$. This value was chosen completely arbitrarily, since this visualization isn't going to be used to inform further analysis.
+```{r previs, message=FALSE, warning=FALSE}
+set.seed(629)
+tsne_df <- Rtsne(home_df[, c(13:49)], 
+                 dims = 3, 
+                 initial_dims = 30, 
+                 pca = TRUE, 
+                 max_iter = 1500, 
+                 perplexity = 15, 
+                 check_duplicates = FALSE)
+tsne_df$Y <- as.data.frame(tsne_df$Y)
+clust_df <- kmeans(tsne_df$Y, centers = 7, iter.max = 30)
+```
+
+Obviously, the results of the clustering are not well represented in two dimensions. Honestly, this is probably because t-SNE is massive overkill for this dataset, which is fairly linear; t-SNE is typically used to get low-dimensional representations of sparse or very non-linear data.
+```{r tsne2, message=FALSE, warning=FALSE}
+p1 <- plot_ly(tsne_df$Y, x = ~V1, y = ~V2,
+              color = clust_df$cluster, text = home_df$team_year) %>%
+  layout(scene = list(xaxis = list(title = "t_SNE 1"),
+                      yaxis = list(title = "t-SNE 2")))
+p1
+```
+
+In three dimensions, the clusters are a bit more well separated. This information is pretty useless; it's literally here just because I think t-SNE based visualizations are cool and I had a few extra minutes.
+```{r tsne3, message=FALSE, warning=FALSE}
+p2 <- plot_ly(tsne_df$Y, x = ~V1, y = ~V2, z = ~V3, 
+             color = clust_df$cluster, text = df$team_year) %>% 
+  layout(scene = list(xaxis = list(title = "t-SNE 1"), 
+                      yaxis = list(title = "t-SNE 2"), 
+                      zaxis = list(title = "t-SNE 3")))
+p2
+```
+
+# Modeling
+## Train/Test Set Selection
+A good train / test set is a thing of beauty.
+```{r subset, message=FALSE, warning=FALSE}
+set.seed(629)  # we love reproducibility
+train_df <- sample_n(home_df, size = nrow(home_df) * .75, replace = FALSE)
+test_df <- anti_join(home_df, train_df)
+```
+
+## Feature Selection
+Here we use a random forest to assess variable importance for our linear regression.
+```{r featselect}
+# random forests
+rf1 <- randomForest(x = train_df[, c(13:49)], 
+                    y = train_df$Home.Score, 
+                    ntree = 1000, 
+                    importance = TRUE)
+varImpPlot(rf1, n.var = 15, main = "Variable Importance -- Win/Loss")  # thank god this is built-in
+```
+
+## Model Selection
+In this section we'll be evaluating 50 versions of each model on bootstrapped samples from the original training set. We'll record the test error from each trained model, and average the results. The results will be checked for overfitting by computing test error on the original test set, and the best-performing model type will be chosen to generate the final predictions. We'll train / test solely on the home team data for simplicity.
+### Linear Regression
+Here we fit simple linear models for both spread and total.
+```{r slr, message=FALSE, warning=FALSE}
+set.seed(629)
+rmse_lm <- c()
+for (i in 1:50) {
+  t1 <- sample_n(train_df, size = nrow(train_df) * .75, replace = FALSE)
+  t2 <- anti_join(train_df, t1)
+  lm1 <- lm(t1$Home.Score ~ off_Points + def_Points + off_Total_Yds +
+              def_Total_Yds + def_Rush_TD + def_Rush_Yds + off_Pass_TD +
+              off_Rush_TD + Home_Rating + off_Rush_Yds + off_Pass_Yds + 
+              def_Pass_Yds + off_Pass_1D + off_Pass_Cmp + off_Rush_1D, 
+            t1[, c(4, 13:49)])
+  preds <- predict(lm1, newdata = t2[, c(4, 13:49)])
+  err <- sqrt(mean((t2$Home.Score - preds)^2))
+  rmse_lm[i] <- err
+}
+```
+
+### Generalized Linear Model
+Here we run a Poisson model for total points only, as the Poisson distribution does not allow for negative values such as those encountered with spread.
+```{r, message=FALSE, warning=FALSE}
+set.seed(629)
+rmse_glm <- c()
+for (i in 1:50) {
+  t1 <- sample_n(train_df, size = nrow(train_df) * .75, replace = FALSE)
+  t2 <- anti_join(train_df, t1)
+  glm1 <- glm(t1$Home.Score ~ off_Points + def_Points + off_Total_Yds +
+              def_Total_Yds + def_Rush_TD + def_Rush_Yds + off_Pass_TD +
+              off_Rush_TD + Home_Rating + off_Rush_Yds + off_Pass_Yds + 
+              def_Pass_Yds + off_Pass_1D + off_Pass_Cmp + off_Rush_1D,  
+              data = t1[, c(4, 13:49)], family = "poisson")
+  preds <- predict(glm1, newdata = t2[, c(4, 13:49)], type = "response")
+  err <- sqrt(mean((t2$Home.Score - preds)^2))
+  rmse_glm[i] <- err
+}
+```
+
+### Penalized Linear Regression
+This loop runs LASSO, which reduces some coefficients to zero according to a cost function.
+```{r plr, message=FALSE, warning=FALSE}
+set.seed(629)
+rmse_lasso <- c()
+lambda <- 10^seq(10, -2, length = 100)
+for (i in 1:50) {
+  t1 <- sample_n(train_df, size = nrow(train_df) * .75, replace = FALSE)
+  t2 <- anti_join(train_df, t1)
+  y1 <- t1$Home.Score
+  y2 <- t2$Home.Score
+  x1 <- model.matrix(Home.Score ~ ., t1[, c(4, 13:49)])
+  x2 <- model.matrix(Home.Score ~ ., t2[, c(4, 13:49)])
+  lasso1 <- glmnet(x1, y1, alpha = 1, lambda = lambda)
+  cv_out <- cv.glmnet(x1, y1, alpha = 1)
+  best_lambda <- cv_out$lambda.min
+  preds <- predict(lasso1, newx = x2, s = best_lambda)
+  rmse1 <- sqrt(mean((y2 - preds)^2))
+  rmse_lasso[i] <- rmse1
+}
+```
+
+### Random Forest
+Here we use a random forest regression algorithm to obtain an error estimate.
+```{r forest, message=FALSE, warning=FALSE}
+set.seed(629)
+rmse_rf <- c()
+for (i in 1:50) {
+  t1 <- sample_n(train_df, size = nrow(train_df) * .75, replace = FALSE)
+  t2 <- anti_join(train_df, t1)
+  rf <- randomForest(x = t1[, c(13:49)], 
+                     y = t1$Home.Score, 
+                     ntree = 1000,
+                     importance = TRUE)
+  preds <- predict(rf, newdata = t2[, c(13:49)], 
+                   type = "response")
+  err <- sqrt(mean((t2$Home.Score - preds)^2))
+  rmse_rf[i] <- err
+}
+```
+
+### Gradient Boosting
+```{r xgboost, message=FALSE, warning=FALSE}
+set.seed(629)
+rmse_gb <- c()
+for (i in 1:50) {
+  t1 <- sample_n(train_df, size = nrow(train_df) * .75, replace = FALSE)
+  t2 <- anti_join(train_df, t1)
+  gb <- gbm(Home.Score ~ ., data = t1[, c(4, 13:49)], distribution = "gaussian", 
+            n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+  preds <- predict(gb, newdata = t2[, c(4, 13:49)], n.trees = 7500)
+  err <- sqrt(mean((t2$Home.Score - preds)^2))
+  rmse_gb[i] <- err
+}
+```
+
+### Artificial Neural Network
+```{r ANN, warning=FALSE, message=FALSE}
+set.seed(629)
+rmse_ann <- c()
+for (i in 1:50) {
+  t1 <- sample_n(train_df, size = nrow(train_df) * .75, replace = FALSE)
+  t2 <- anti_join(train_df, t1)
+  ann <- neuralnetwork(X = as.matrix(t1[, c(13:49)]), 
+                       y = as.matrix(t1$Home.Score), 
+                       hidden.layers = c(30, 20, 10, 30), 
+                       optim.type = "sgd", learn.rates = .001)
+  preds <- predict(ann, newdata = as.matrix(t2[, c(13:49)]))
+  preds <- as.numeric(noquote(preds$predictions))
+  err <- sqrt(mean((t2$Home.Score - preds)^2))
+  rmse_ann[i] <- err
+}
+```
+
+## Result Visualization
+LASSO is the best! 
+```{r viz}
+rmse <- cbind(rmse_lm, rmse_lasso, rmse_glm, rmse_rf, rmse_gb, rmse_ann)
+rmse <- as.data.frame(rmse)
+boxplot(rmse$rmse_lm, rmse$rmse_glm, rmse$rmse_lasso, 
+        rmse$rmse_rf, rmse$rmse_gb, rmse$rmse_ann,
+        xlab = "Regression Methods", 
+        ylab = "Root Mean Squared Error", 
+        names = c("LM", "Poisson GLM", "LASSO", "Random Forest", "Gradient Boosting", "Neural Network"), 
+        col = "dodgerblue", 
+        main = "Comparison of Regression Methods")
+```
+
+## Visualization
+Here we see that, surprisingly, a simple linear regression performs the best.
+```{r}
+boxplot(rmse_lm, rmse_glm, rmse_lasso, rmse_rf, rmse_gb, rmse_ann, 
+        names = c("LM", "GLM", "LASSO", "Random Forest", "Boosting", "Neural Net"), 
+        main = "Comparison of Regression Method RMSE")
+```
+
+## Final Model Training
+```{r}
+# home
+y1 <- home_df$Home.Score
+x1 <- model.matrix(Home.Score ~ ., home_df[, c(4, 13:49)])
+lambda <- 10^seq(10, -2, length = 100)
+home_model <- glmnet(x1, y1, alpha = 1, lambda = lambda)
+cv_out <- cv.glmnet(x1, y1, alpha = 1)
+home_lambda <- cv_out$lambda.min
+
+#away
+y1 <- away_df$Visitor.Score
+x1 <- model.matrix(Visitor.Score ~ ., away_df[, c(5, 13:49)])
+away_model <- glmnet(x1, y1, alpha = 1, lambda = lambda)
+cv_out <- cv.glmnet(x1, y1, alpha = 1)
+away_lambda <- cv_out$lambda.min
+```
+
+
+## Prediction
+### Making Predictions
+```{r}
+set.seed(629)
+home_2019 <- subset(home_df, home_df$Year == "2019")
+away_2019 <- subset(away_df, away_df$Year == "2019")
+home_teams <- game_predictions$Home.Team
+away_teams <- game_predictions$Visitor.Team
+home_preds <- c()
+away_preds <- c()
+
+for (i in seq(home_teams)) {
+  team <- home_teams[i]
+  team_df <- subset(home_2019, home_2019$Home.Team == team)
+  if(nrow(team_df) > 0) {
+    y1 <- team_df$Home.Score
+    x1 <- model.matrix(Home.Score ~ ., team_df[, c(4, 13:49)])
+    p <- predict(home_model, newx = x1, s = home_lambda)
+    mean_p <- mean(p)
+    home_preds[i] <- mean_p
+  } else {
+    home_preds[i] <- NA
+  }
+}
+
+for (i in seq(away_teams)) {
+  team <- away_teams[i]
+  team_df <- subset(away_2019, away_2019$Visitor.Team == team)
+  if(nrow(team_df) > 0) {
+    y1 <- team_df$Visitor.Score
+    x1 <- model.matrix(Visitor.Score ~ ., team_df[, c(5, 13:49)])
+    p <- predict(away_model, newx = x1, s = away_lambda)
+    mean_p <- mean(p)
+    away_preds[i] <- mean_p
+  } else {
+    away_preds[i] <- NA
+  }
+}
+```
+
+### Filling Out Dataframe
+```{r}
+total_points <- c()
+spread <- c()
+winloss <- c()
+
+for (i in seq(home_preds)) {
+  t <- subset(home_preds, !is.na(home_preds))
+  if (is.na(home_preds[i])) {
+    home_preds[i] <- mean(t) - rnorm(1, mean = 14, sd = 1)
+  }
+}
+
+for (i in seq(away_preds)) {
+  t <- subset(away_preds, !is.na(away_preds))
+  if (is.na(away_preds[i])) {
+    away_preds[i] <- mean(t) - rnorm(1, mean = 14, sd = 1)
+  }
+}
+
+away_preds <- round(away_preds, 0)
+home_preds <- round(home_preds, 0)
+
+for (i in seq(home_preds)) {
+  total_points[i] <- sum(home_preds[i], away_preds[i])
+  spread[i] <- home_preds[i] - away_preds[i]
+  winloss[i] <- ifelse(home_preds[i] >= away_preds[i], 1, 0)
+}
+
+game_predictions$Spread <- spread
+game_predictions$Total <- total_points
+game_predictions$Result <- winloss
+game_predictions <- game_predictions[, -c(7:8)]
+
+write.csv(game_predictions, "/Users/Jack/Desktop/game_predictions.csv")
+```

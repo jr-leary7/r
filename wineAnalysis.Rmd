@@ -1,0 +1,217 @@
+---
+title: "Wine Analysis"
+author: "Jack Leary"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_knit$set(root.dir = "Users/Jack/Documents/My-Projects")
+```
+
+```{r, message=FALSE, warning = FALSE}
+# libraries
+library(tidyverse)
+library(plotly)
+library(e1071)
+library(randomForest)
+library(caret)
+library(keras)
+library(xgboost)
+```
+
+```{r, message=FALSE}
+# load data
+wineFull <- read_csv("/Users/Jack/Desktop/Datasets/winequalityN.csv")
+```
+
+After doing some real basic data cleaning, I centered and scaled each numerical feature so that I could overlay a $N(0, 1)$ density line over each plot to check for normality, skew, and kurtosis within each feature.
+```{r}
+# cleaning
+wineFull$type <- as.factor(wineFull$type)
+wineFull$quality <- as.factor(wineFull$quality)
+colnames(wineFull) <- c("type", "fixedAcidity", "volatileAcidity", "citricAcid", 
+                        "residualSugar", "chlorides", "freeSulfurDioxide", 
+                        "totalSulfurDioxide", "density", "pH", "sulphates", 
+                        "percentAlcohol", "quality")
+wineFullCopy <- wineFull
+wineFullCopy[, 2:12] <- scale(wineFullCopy[, 2:12], center = TRUE, scale = TRUE)
+wineFull <- na.omit(wineFull)
+wineFullCopy <- na.omit(wineFullCopy)
+```
+
+From the histograms, it appears that volatile acidity and residual sugar are both skewed right, while total sulfur dioxide looks bimodal. The other variables seem approximately normally distributed, and I don't believe there's sufficient reason to transform any of the features further.
+```{r, echo=FALSE, warning=FALSE}
+# setting up histograms to check for normality/kurtosis
+set.seed(629)
+x <- rnorm(1000000)
+fit <- density(x)
+x2 <- rnorm(1000000, mean = 6, sd = 1)
+fit2 <- density(x2)
+p1 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~fixedAcidity, name = "Histogram") %>% 
+  layout(title = "Fixed Acidity Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p2 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~volatileAcidity) %>% 
+  layout(title = "Volatile Acidity Histogram", name = "Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p3 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~citricAcid, name = "Histogram") %>% 
+  layout(title = "Citric Acid Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p4 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~residualSugar, name = "Histogram") %>% 
+  layout(title = "Residual Sugar Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p5 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~chlorides, name = "Histogram") %>% 
+  layout(title = "Chlorides Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p6 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~freeSulfurDioxide, name = "Histogram") %>% 
+  layout(title = "Free Sulfur Dioxide Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p7 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~totalSulfurDioxide, name = "Histogram") %>% 
+  layout(title = "Total Sulfur Dioxide Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p8 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~density, name = "Histogram") %>% 
+  layout(title = "Density Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p9 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~pH, name = "Histogram") %>% 
+  layout(title = "pH Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p10 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~sulphates, name = "Histogram") %>% 
+  layout(title = "Sulphates Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p11 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~percentAlcohol, name = "Histogram") %>% 
+  layout(title = "Alcohol by Volume Histogram") %>% 
+  add_trace(x = fit$x, y = fit$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(0, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+p12 <- plot_ly(wineFullCopy) %>% 
+  add_histogram(x = ~quality, name = "Histogram") %>% 
+  layout(title = "Quality Histogram") %>% 
+  add_trace(x = fit2$x, y = fit2$y, type = "scatter", mode = "lines", fill = NULL, 
+            yaxis = "y2", name = "N(6, 1) Density") %>% 
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+
+p1
+p2
+p3
+p4
+p5
+p6
+p7
+p8
+p9
+p10
+p11
+p12
+```
+
+I originally thought that I wouldn't be able to include alohol percentage as a feature. I believed that alcohol percentage didn't differ in between red and white wines, thus including it would be statistical malpractice. However, after running a two-sided t-test, it appears that there is a small but highly significant difference between the two. 
+```{r}
+redAlc <- wineFull[wineFull$type == "red", ]$percentAlcohol
+whiteAlc <- wineFull[wineFull$type == "white", ]$percentAlcohol
+t.test(redAlc, whiteAlc, alternative = "two.sided", paired = FALSE)
+```
+
+```{r}
+# train/test set creation
+set.seed(629)
+trainIdx <- sample(seq_len(nrow(wineFull)), size = nrow(wineFull) * .75)
+wineTrain <- wineFull[trainIdx, ]
+wineTest <- wineFull[-trainIdx, ]
+```
+
+I decided to use a random forest to select which features to include in modeling later. From the variable importance plot, it looks like totalSulfurDioxide, chlorides, volatileAcidity, sulphates, and density are the 5 most important variables for reducing error, so I'll start with those and adjust as needed.
+```{r randomForest}
+# random forest
+rf1 <- randomForest(x = wineTrain[, 2:12], y = wineTrain$type, 
+                    ntree = 500, importance = TRUE)
+varImpPlot(rf1)
+```
+
+```{r binomialGLM}
+# binomial glm
+glm1 <- glm(type ~ ., data = wineTrain, family = "binomial")
+summary(glm1) # resid deviance = 307.43, AIC = 343.43
+
+glm2 <- glm(type ~ totalSulfurDioxide + chlorides + volatileAcidity + sulphates + density, 
+            data = wineTrain, family = "binomial")
+summary(glm2) # resid deviance = 558.35, AIC = 570.35
+
+glm3 <- glm(type ~ volatileAcidity + residualSugar + chlorides + freeSulfurDioxide + 
+              totalSulfurDioxide + density + sulphates + percentAlcohol, data = wineTrain, 
+            family = "binomial")
+summary(glm3) # resid deviance = 331.18, AIC = 349.18
+predictGLM <- vector()
+probsGLM <- predict(glm3, wineTest, type = "response")
+for(i in 1:length(probsGLM)) {
+  if(probsGLM[i] > .5) {
+    predictGLM[i] <- "white"
+  } else {
+    predictGLM[i] <- "red"
+  }
+}
+predictGLM <- as.factor(predictGLM)
+confusionMatrix(wineTest$type, predictGLM)
+```
+
+```{r svm}
+set.seed(629)
+tune1 <- tune(svm, type ~ volatileAcidity + residualSugar + chlorides + freeSulfurDioxide + 
+              totalSulfurDioxide + density + sulphates + percentAlcohol, data = wineTrain, 
+              ranges = list(gamma = 10^(-5:-1), cost = 10^(-3:1)))
+tune1$best.parameters
+tune1$best.model
+
+svm1 <- svm(type ~ volatileAcidity + residualSugar + chlorides + freeSulfurDioxide + 
+              totalSulfurDioxide + density + sulphates + percentAlcohol, data = wineTrain, 
+              kernel = "radial", gamma = 0.1, cost = 10)
+predictSVM <- predict(svm1, wineTest)
+confusionMatrix(wineTest$type, predictSVM)
+```
+
+```{r XGBoost}
+set.seed(629)
+xgb1 <- train(type ~ volatileAcidity + residualSugar + chlorides + freeSulfurDioxide + 
+              totalSulfurDioxide + density + sulphates + percentAlcohol, data = wineTrain, 
+              method = "xgbTree", trControl = trainControl("cv", number = 10))
+xgb1$bestTune
+predictXGB <- xgb1 %>% predict(wineTest)
+confusionMatrix(wineTest$type, predictXGB)
+```
+
+
+
+
+
+
+
