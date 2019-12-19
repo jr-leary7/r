@@ -9,10 +9,11 @@ output:
     toc: true
     toc_depth: 3
     number_sections: true
+    df_print: paged
 ---
 
 # Introduction
-This a a downstream analysis pipeline based on the ```Seurat``` package developed and maintained by the Satija Lab at the New York Genome Center. More information on the Satija Lab, their research, and the ```Seurat``` package can be found here: https://satijalab.org. 
+This a a downstream analysis pipeline based on the `Seurat` package developed and maintained by the Satija Lab at the New York Genome Center. More information on the Satija Lab, their research, and the `Seurat` package can be found [here](https://satijalab.org). 
 
 ```{r libraries, warning=FALSE, message=FALSE}
 library(dplyr)
@@ -20,12 +21,12 @@ library(Seurat)
 library(DESeq2)
 ```
 
-Here we import the results of the ```cellranger``` analysis pipeline and save them in a Seurat object. Upon creation of the Seurat object, the sparse counts are subsetted to only include those genes that are found in at least three cells, and only those cells that include information on at least two hundred genes.
+Here we import the results of the `cellranger` analysis pipeline and save them in a Seurat object. Upon creation of the Seurat object, the sparse counts are subsetted to only include those genes that are found in at least three cells, and only those cells that include information on at least two hundred genes.
 ```{r import}
 path1 <- "/Volumes/Home/Jen Jen Yeh Lab/Single Cell Seq/"
 runname <- "eaton94"
 samplename <- "Human_190429T1Pi"
-path2 <- paste0(path1, runname, "/hm38/", samplename)
+path2 <- paste0(path1, runname, "/hm38/", samplename, "/outs/raw_feature_bc_matrix")
 sparse_counts <- Read10X(data.dir = path2)
 sc <- CreateSeuratObject(counts = sparse_counts, 
                          project = samplename, 
@@ -35,7 +36,7 @@ sc <- CreateSeuratObject(counts = sparse_counts,
 
 A peek at the imported counts shows us that they are saved in a sparse matrix, a specialized file format that saves space by representing zero values as $.$. This is necessary because single cell RNAseq counts are composed mostly of zero values; this is a unique problem in the data analysis of scRNAseq data that we will address later.
 ```{r peek}
-sparse_counts[c("AURKA", "TP53", "AURKB"), 1:5]
+sparse_counts[c("AURKA", "TP53", "AURKB"), 1:4]
 ```
 
 # Quality Control
@@ -63,14 +64,14 @@ sc <- subset(sc, subset = nFeature_RNA > 200 & percent_MT < 5)
 ```
 
 ## Normalization
-This step performs log-normalization of our raw counts data using the default values provided by ```Seurat```. 
+This step performs log-normalization of our raw counts data using the default values provided by `Seurat`. 
 ```{r}
 sc <- NormalizeData(sc, normalization.method = "LogNormalize", 
                     scale.factor = 10000)
 ```
 
 # Feature Selection
-Now we want to find those genes that are *variably expressed*, i.e. they are highly expressed in somoe cells and lowly expressed in others. These genes will be the focus of our further downstream analysis, since they are more likely to contain biological signal. ```Seurat V3``` models the mean-variance relationship in several steps. First, the mean and variance of each gene's expression is calculated from the raw counts, and then transformed using $\log_{10}$. A loess (Locally Estimated Scatterplot Smoothing) curve is fitted to this data to predict the variance of each gene using the base R package ```loess```. The variances are then standardized using a Z-score transformation, and the $n$ highest-variable genes are selected.
+Now we want to find those genes that are *variably expressed*, i.e. they are highly expressed in some cells and lowly expressed in others. These genes will be the focus of our further downstream analysis, since they are more likely to contain biological signal. `Seurat V3` models the mean-variance relationship in several steps. First, the mean and variance of each gene's expression is calculated from the raw counts, and then transformed using $\log_{10}$. A loess (Locally Estimated Scatterplot Smoothing) curve is fitted to this data to predict the variance of each gene using the base R package `loess`. The variances are then standardized using a Z-score transformation, and the $n$ highest-variable genes are selected.
 ```{r, warning=FALSE, message=FALSE}
 sc <- FindVariableFeatures(sc, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
 top_10 <- head(VariableFeatures(sc), 10)
@@ -81,7 +82,7 @@ p2
 
 # Dimension Reduction
 ## Scaling
-Scaling and centering the data is a necessary part of principal component analysis (PCA), which will be the building block for the rest of our dimension reduction and cluster analysis. If this transformation prove ineffective, we can make use of the ```sctransform``` workflow provided by the Satija Lab to regress out unwanted sources of variation. 
+Scaling and centering the data is a necessary part of principal component analysis (PCA), which will be the building block for the rest of our dimension reduction and cluster analysis. If this transformation prove ineffective, we can make use of the `sctransform` workflow provided by the Satija Lab to regress out unwanted sources of variation. 
 ```{r}
 sc <- ScaleData(sc)
 ```
@@ -96,7 +97,7 @@ DimHeatmap(sc, dims = 1:6, cells = 1500, balanced = TRUE, reduction = "pca")
 ```
 
 ### Choosing principal components
-PCA is an unsupervised technique; this implies that just because it identifies a source of variation, that variation might just be noise. Fortunately, several techniques exist to aid us in determining which PCs capture statistically significant sources of heterogeneity. The ```JackStraw``` function uses bootstrap sampling and PCA to produce p-values for each principal component. We can see via the plot that the statistical significance of the PCs dips starting in the late 20s. Thus, 30 PCs seems to be a good number to use going forward, at least for this dataset.
+PCA is an unsupervised technique; this implies that just because it identifies a source of variation, that variation might just be noise. Fortunately, several techniques exist to aid us in determining which PCs capture statistically significant sources of heterogeneity. The `JackStraw` function uses bootstrap sampling and PCA to produce p-values for each principal component. We can see via the plot that the statistical significance of the PCs dips starting in the late 20s. Thus, 30 PCs seems to be a good number to use going forward, at least for this dataset.
 ```{r, results='hide', message=FALSE, warning=FALSE}
 sc <- JackStraw(sc, reduction = "pca", num.replicate = 100, dims = 50)
 sc <- ScoreJackStraw(sc, dims = 1:50)
@@ -104,20 +105,20 @@ JackStrawPlot(sc, dims = 1:30)
 ```
 
 ## t-SNE
-t-Distributed Stochastic Neighbors Embedding is a non-linear dimension reduction technique that excels at preserving both the global and local structure of the input data. It uses gradient descent to recreate the high-dimensional probability distribution of the points in a low-dimnsional space. The perplexity parameter of t-SNE determines how much you'd like to preserve local structure over global structure, but it's default is set to 30. It's a good idea to provide a seed to the t-SNE algorithm since, due to the nature of the non-convex optimization problem it attempts to solve, you can receive different results from different runs. Setting a seed ensures that the algorithm always starts at the same point.
+t-Distributed Stochastic Neighbors Embedding is a non-linear dimension reduction technique that attempts to preserve both the global and local structure of the input data. It uses gradient descent to recreate the high-dimensional probability distribution of the points in a low-dimensional space. The perplexity parameter of t-SNE determines how much you'd like to preserve local structure over global structure, but it's default is set to 30. It's a good idea to provide a seed to the t-SNE algorithm since, due to the nature of the non-convex optimization problem it attempts to solve, you can receive different results from different runs. Setting a seed ensures that the algorithm always starts at the same point.
 ```{r}
 sc <- RunTSNE(sc, reduction = "pca", dims = 1:30, seed.use = 629, dim.embed = 3)
 ```
 
 ## UMAP
-Uniform Manifold Approximation and Projection is a fairly recent development in the area of dimension reduction that was proposed by McInnes *et al.* in 2018. It is very similar to t-SNE, although it's authors claim that it preserves both the global and local structure of your data. This means that the distances between the clusters in the low-dimensional space actually represent the actual distances between the clusters in the high-dimensional space, which they do not in t-SNE. Like t-SNE, it is a non-deterministic method, and it is best practice to provide a seed. 
+Uniform Manifold Approximation and Projection is a fairly recent development in the area of dimension reduction that was proposed by McInnes *et al.* in 2018. It is very similar to t-SNE, although it's authors claim that it preserves both the global and local structure of your data. This means that the distances between the clusters in the low-dimensional space actually represent the distances between the clusters in the high-dimensional space, which they do not in t-SNE. Like t-SNE, it is a non-deterministic method, and it is best practice to provide a seed. 
 ```{r, results='hide', message=FALSE}
 sc <- RunUMAP(sc, reduction = "pca", dims = 1:30, umap.method = "uwot", 
               n.components = 3, seed.use = 629)
 ```
 
 # Clustering
-The main clustering method implemented in ```Seurat``` is graph-based. This type of clustering makes no assumptions about the true number of clusters, or the shape or density of the data, which is useful because scRNAseq data is so sparse. Cells are sorted into a k-nearest neighbors graph, and then iteratively sorted into clusters.
+The main clustering method implemented in `Seurat` is graph-based. This type of clustering makes no assumptions about the true number of clusters, or the shape or density of the data, which is useful because scRNAseq data is so sparse. Cells are sorted into a k-nearest neighbors graph, and then iteratively sorted into clusters.
 ```{r, results='hide', message=FALSE}
 sc <- FindNeighbors(sc, dims = 1:30)
 sc <- FindClusters(sc, resolution = 0.5)
@@ -129,7 +130,7 @@ After performing clustering, we can use the dimension reduction results we produ
 DimPlot(sc, reduction = "pca", dims = c(1, 2))
 ```
 
-t-SNE obviously does a much better job than PCA, and we can defintely use these results. However, the center of the plot seems to show some muddling of the clusters. Potentially UMAP performed better?
+t-SNE obviously does a much better job than PCA, and we can definitely use these results. However, the center of the plot seems to show some muddling of the clusters. Potentially UMAP performed better?
 ```{r}
 DimPlot(sc, reduction = "tsne", dims = c(1, 2))
 ```
@@ -140,16 +141,91 @@ DimPlot(sc, reduction = "umap", dims = c(1, 2))
 ```
 
 At this point, it's a good idea to save and reload the Seurat object so that we don't need to perform all the previous steps each time we want to do more downstream analysis.
-```{r}
-saveRDS(sc, file = paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/", 
-                          samplename, "_hm38.Rds"))
-readRDS("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/Human_190429T1Pi_hm38.Rds")
+```{r, results='hide', warning=FALSE, message=FALSE}
+# saveRDS(sc, file = paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/", 
+#                           samplename, "_hm38.Rds"))
+sc <- readRDS("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/Human_190429T1Pi_hm38.Rds")
 ```
 
 # Biomarker Identification
-After clustering and visualizing our cells, we'd like to assign cell types to each cluster. This is accomplished by determining which genes are significantly differentially expressed between clusters, and comparing those genes to canonical markers. We use the ```DESeq2``` package developed by UNC's own Michael Love *et al.* to identify differntially expressed genes. 
+After clustering and visualizing our cells, we'd like to assign cell types to each cluster. This is accomplished by determining which genes are significantly differentially expressed between clusters, and comparing those genes to canonical markers. 
 ```{r}
-sc.markers <- FindAllMarkers(sc, only.pos = TRUE, test.use = "DESeq2")
+sc_markers <- FindAllMarkers(sc, only.pos = TRUE, test.use = "wilcox")
+top_markers <- sc_markers %>% group_by(cluster) %>% top_n(n = 1, wt = avg_logFC)
+top_markers
 ```
 
+## Visualization
+We visualize these results first in the context of the UMAP dimension reduction plot. 
+```{r, message=FALSE, warning=FALSE}
+for (i in seq(nrow(top_markers))) {
+  par(mfrow = c(2, 1))
+  DimPlot(sc, reduction = "umap")
+  FeaturePlot(sc, features = top_markers$gene[i], dims = c(1, 2))
+}
+```
 
+Next, we use a violin plot of gene expression grouped by cluster to show how much each marker is differentially expressed.
+```{r, message=FALSE, warning=FALSE}
+for (i in seq(nrow(top_markers))) {
+  p3 <- VlnPlot(sc, features = top_markers$gene[i])
+  print(p3)
+}
+```
+
+Finally, we plot a heatmap of the top seven marker genes per cluster, showing that there are in fact significant differences in gene expression levels between clusters.
+```{r, message=FALSE, warning=FALSE}
+top7 <- sc_markers %>% group_by(cluster) %>% top_n(n = 7, wt = avg_logFC)
+DoHeatmap(sc, features = top7$gene, angle = 45) + NoLegend()
+```
+
+## Assigning Cell Type Identities
+```{r}
+top2 <- sc_markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
+marker_df <- data.frame(c(0:10), rep(NA, 11), rep(NA, 11))
+colnames(marker_df) <- c("Cluster", "Biomarkers", "Cell Type")
+
+for (i in seq(nrow(marker_df))) {
+  marker_df$Biomarkers[i] <- paste0(top2$gene[2 * i - 1], ", ", top2$gene[2 * i])
+}
+```
+
+## Digital Cell Sorter
+To assign cell types to dimension-reduced clusters, we'll use the `DigitalCellSorter` tool, for which we'll have to make the switch to coding in Python. First, we save our counts matrix in a format that the `pandas` module can read.
+```{r}
+counts_df <- sc@assays$RNA@counts
+# write.csv(counts_df, "/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/counts.csv")
+```
+
+We import the necessary modules for cluster analysis.
+```{python}
+import DigitalCellSorter
+import pandas as pd
+import xlrd
+```
+
+Here, the counts are read in and the indices of the `pandas` dataframe are coerced into the format that `DigitalCellSorter` prefers.
+```{python}
+counts = pd.read_csv("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/counts.csv")
+counts = pd.DataFrame(counts)
+# first we'll need to reset the indices as required by DigitalCellSorter
+counts.set_index('Unnamed: 0', inplace = True)
+counts = counts.rename_axis('"Unnamed: 0').rename_axis('cell', axis = 'columns')
+counts.head()
+```
+
+An object of class `DigitalCellSorter` is created. 
+```{python}
+DCS = DigitalCellSorter.DigitalCellSorter()
+```
+
+The `prepare()` function makes sure that the input data fit the object's parameters.
+```{python}
+expr_df = DCS.prepare(counts)
+expr_df.head()
+```
+
+Here is where the actual processing of the data will occur once I get the modules sorted out.
+```{python}
+# DCS.process(expr_df)
+```
