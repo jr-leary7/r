@@ -1,5 +1,5 @@
 ---
-title: "Downstream Analysis of Single Cell RNAseq Data Using Seurat"
+title: "Downstream Analysis of Human Single Cell RNAseq Data Using Seurat"
 author: "Jack Leary"
 date: "`r Sys.Date()`"
 output:
@@ -19,14 +19,22 @@ This a a downstream analysis pipeline based on the `Seurat` package developed an
 library(dplyr)
 library(Seurat)
 library(DESeq2)
+library(SingleR)
+library(scRNAseq)
+library(SingleCellExperiment)
+library(scater)
+library(decoderr)
+library(uwot)
+library(phateR)
+library(reticulate)
 ```
 
 Here we import the results of the `cellranger` analysis pipeline and save them in a Seurat object. Upon creation of the Seurat object, the sparse counts are subsetted to only include those genes that are found in at least three cells, and only those cells that include information on at least two hundred genes.
 ```{r import}
 path1 <- "/Volumes/Home/Jen Jen Yeh Lab/Single Cell Seq/"
-runname <- "eaton94"
-samplename <- "Human_190429T1Pi"
-path2 <- paste0(path1, runname, "/hm38/", samplename, "/outs/raw_feature_bc_matrix")
+runname <- "eaton96"
+samplename <- "Human_P190722T1Pi"
+path2 <- paste0(path1, runname, "/hm38/", samplename, "/raw_feature_bc_matrix")
 sparse_counts <- Read10X(data.dir = path2)
 sc <- CreateSeuratObject(counts = sparse_counts, 
                          project = samplename, 
@@ -34,7 +42,7 @@ sc <- CreateSeuratObject(counts = sparse_counts,
                          min.features = 200)
 ```
 
-A peek at the imported counts shows us that they are saved in a sparse matrix, a specialized file format that saves space by representing zero values as $.$. This is necessary because single cell RNAseq counts are composed mostly of zero values; this is a unique problem in the data analysis of scRNAseq data that we will address later.
+A peek at the imported counts shows us that they are saved in a sparse matrix, a specialized file format that saves space by representing zero values as "$.$", which is necessary because single cell RNAseq counts are composed mostly of zero values. This is a unique problem in the data analysis of scRNAseq data that we will address later.
 ```{r peek}
 sparse_counts[c("AURKA", "TP53", "AURKB"), 1:4]
 ```
@@ -52,7 +60,7 @@ sc[["percent_MT"]] <- PercentageFeatureSet(sc, pattern = "^MT-")
 head(sc@meta.data, 5)
 ```
 
-Here we visually compare different QC metrics, including the percentage of mitochondrial DNA that we just added.
+Here we visually compare different QC metrics, including the percentage of mitochondrial DNA that we just added. We can see that this sample has many cells with a high percentage of mitochondrial DNA. 
 ```{r mito_viz}
 VlnPlot(sc, features = c("nFeature_RNA", "nCount_RNA", "percent_MT"), ncol = 3, 
         pt.size = .1)
@@ -65,14 +73,14 @@ sc <- subset(sc, subset = nFeature_RNA > 200 & percent_MT < 5)
 
 ## Normalization
 This step performs log-normalization of our raw counts data using the default values provided by `Seurat`. 
-```{r}
+```{r norm, message=FALSE}
 sc <- NormalizeData(sc, normalization.method = "LogNormalize", 
                     scale.factor = 10000)
 ```
 
 # Feature Selection
 Now we want to find those genes that are *variably expressed*, i.e. they are highly expressed in some cells and lowly expressed in others. These genes will be the focus of our further downstream analysis, since they are more likely to contain biological signal. `Seurat V3` models the mean-variance relationship in several steps. First, the mean and variance of each gene's expression is calculated from the raw counts, and then transformed using $\log_{10}$. A loess (Locally Estimated Scatterplot Smoothing) curve is fitted to this data to predict the variance of each gene using the base R package `loess`. The variances are then standardized using a Z-score transformation, and the $n$ highest-variable genes are selected.
-```{r, warning=FALSE, message=FALSE}
+```{r var_feats, warning=FALSE, message=FALSE}
 sc <- FindVariableFeatures(sc, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
 top_10 <- head(VariableFeatures(sc), 10)
 p1 <- VariableFeaturePlot(sc, pt.size = .5)
@@ -83,13 +91,13 @@ p2
 # Dimension Reduction
 ## Scaling
 Scaling and centering the data is a necessary part of principal component analysis (PCA), which will be the building block for the rest of our dimension reduction and cluster analysis. If this transformation prove ineffective, we can make use of the `sctransform` workflow provided by the Satija Lab to regress out unwanted sources of variation. 
-```{r}
+```{r scale}
 sc <- ScaleData(sc)
 ```
 
 ## PCA
-When running PCA, we'll use only the 2000 highly variable genes we identified earlier. This speeds up the process, and ensures that we're capturing sources of variation that are potentially biologically interesting. The visualization techniques below help us to determine sources of heterogeneity in our data.
-```{r, message=FALSE,results='hide'}
+When running PCA, we'll use only the 2000 highly variable genes we identified earlier. This speeds up the process, and ensures that we're capturing sources of variation that are potentially biologically interesting. The visualization techniques below help us to determine sources of heterogeneity in our data. Particularly interesting is the "T" shape seen in the PCA plot. This can be interpreted in several ways. Perhaps one cell type has lower counts than the others, or it could be just a biological difference between cell types. Whatever the root cause, if PCA can separate the data as well as this, there will surely be interesting clusters present in the t-SNE / UMAP / PHATE plots.
+```{r pca, message=FALSE,results='hide'}
 sc <- RunPCA(sc, features = VariableFeatures(object = sc))
 VizDimLoadings(sc, dims = 1:2, reduction = "pca")
 DimPlot(sc, reduction = "pca")
@@ -97,59 +105,76 @@ DimHeatmap(sc, dims = 1:6, cells = 1500, balanced = TRUE, reduction = "pca")
 ```
 
 ### Choosing principal components
-PCA is an unsupervised technique; this implies that just because it identifies a source of variation, that variation might just be noise. Fortunately, several techniques exist to aid us in determining which PCs capture statistically significant sources of heterogeneity. The `JackStraw` function uses bootstrap sampling and PCA to produce p-values for each principal component. We can see via the plot that the statistical significance of the PCs dips starting in the late 20s. Thus, 30 PCs seems to be a good number to use going forward, at least for this dataset.
-```{r, results='hide', message=FALSE, warning=FALSE}
+PCA is an unsupervised technique; this implies that just because it identifies a source of variation, that variation might just be noise. Fortunately, several techniques exist to aid us in determining which PCs capture statistically significant sources of heterogeneity. The `JackStraw` function uses bootstrap sampling and PCA to produce p-values for each principal component. We can see via the plot that the significance of the PCs begins to dip around PC 15, so we'll use the top 20 PCs for this analysis.
+```{r pca_check, results='hide', message=FALSE, warning=FALSE}
 sc <- JackStraw(sc, reduction = "pca", num.replicate = 100, dims = 50)
 sc <- ScoreJackStraw(sc, dims = 1:50)
-JackStrawPlot(sc, dims = 1:30)
+JackStrawPlot(sc, dims = 1:40)
 ```
 
 ## t-SNE
 t-Distributed Stochastic Neighbors Embedding is a non-linear dimension reduction technique that attempts to preserve both the global and local structure of the input data. It uses gradient descent to recreate the high-dimensional probability distribution of the points in a low-dimensional space. The perplexity parameter of t-SNE determines how much you'd like to preserve local structure over global structure, but it's default is set to 30. It's a good idea to provide a seed to the t-SNE algorithm since, due to the nature of the non-convex optimization problem it attempts to solve, you can receive different results from different runs. Setting a seed ensures that the algorithm always starts at the same point.
-```{r}
-sc <- RunTSNE(sc, reduction = "pca", dims = 1:30, seed.use = 629, dim.embed = 3)
+```{r tsne}
+sc <- RunTSNE(sc, reduction = "pca", seed.use = 629, dims = 1:20, dim.embed = 2)
 ```
 
 ## UMAP
 Uniform Manifold Approximation and Projection is a fairly recent development in the area of dimension reduction that was proposed by McInnes *et al.* in 2018. It is very similar to t-SNE, although it's authors claim that it preserves both the global and local structure of your data. This means that the distances between the clusters in the low-dimensional space actually represent the distances between the clusters in the high-dimensional space, which they do not in t-SNE. Like t-SNE, it is a non-deterministic method, and it is best practice to provide a seed. 
-```{r, results='hide', message=FALSE}
-sc <- RunUMAP(sc, reduction = "pca", dims = 1:30, umap.method = "uwot", 
-              n.components = 3, seed.use = 629)
+```{r umap, results='hide', message=FALSE, warning=FALSE}
+sc <- RunUMAP(sc, reduction = "pca", dims = 1:20, umap.method = "uwot", 
+              n.components = 2, seed.use = 629, n.epochs = 700)
+```
+
+## PHATE
+Potential of Heat-diffusion for Affinity-based Trajectory Embedding is a very new method published by Moon *et al* at the end of 2019. Like UMAP, the authors claim that the algorithm "captures both local and global nonlinear structure." The algorithm was produced specifically with the analysis of high throughput sequencing data, such as single cell RNAseq, in mind.
+```{r phate, message=FALSE, warning=FALSE}
+pca_df <- data.frame(sc@reductions$pca@cell.embeddings)
+phate_df <- phate(pca_df[, 1:20], ndim = 2, mds.solver = "smacof", npca = 20, seed = 629)
+phate_obj <- CreateDimReducObject(embedding = phate_df$embedding, 
+                     key = "PHATE", 
+                     assay = "RNA")
+sc@reductions$phate <- phate_obj
 ```
 
 # Clustering
 The main clustering method implemented in `Seurat` is graph-based. This type of clustering makes no assumptions about the true number of clusters, or the shape or density of the data, which is useful because scRNAseq data is so sparse. Cells are sorted into a k-nearest neighbors graph, and then iteratively sorted into clusters.
-```{r, results='hide', message=FALSE}
-sc <- FindNeighbors(sc, dims = 1:30)
-sc <- FindClusters(sc, resolution = 0.5)
+```{r graph, results='hide', message=FALSE, warning=FALSE}
+sc <- FindNeighbors(sc, dims = 1:20)
+sc <- FindClusters(sc, resolution = 0.75)
 ```
 
 ## Visualization
-After performing clustering, we can use the dimension reduction results we produced earlier to visualize our clusters. We can see that PCA doesn't do a great job of separating the clusters, which is generally to be expected with single cell data.
-```{r}
+After performing clustering, we can use the dimension reduction results we produced earlier to visualize our clusters. We can see that PCA actually does a decent job separating the clusters for once, and that as predicted one of the ends of the "T" shape is its own cluster.
+```{r pca_plot}
 DimPlot(sc, reduction = "pca", dims = c(1, 2))
 ```
 
-t-SNE obviously does a much better job than PCA, and we can definitely use these results. However, the center of the plot seems to show some muddling of the clusters. Potentially UMAP performed better?
-```{r}
+t-SNE does a better job than PCA, but the clusters in the middle are still a bit muddled.
+```{r tsne_plot}
 DimPlot(sc, reduction = "tsne", dims = c(1, 2))
 ```
 
-We can see here that UMAP superbly separated all eleven clusters. 
-```{r}
+We can see here that UMAP did a good job of separating all the clusters, and it appears to me that more of the global structure has been preserved in the form of the distances between the clusters.
+```{r umap_plot}
 DimPlot(sc, reduction = "umap", dims = c(1, 2))
+```
+
+PHATE is used to both separate clusters while preserving global and local structure and identify biological processes in the form of trajectories. We can see some interesting trajectories in almost all of the clusters, including parallel ones in clusters 3 and 4.
+```{r phate_plot}
+DimPlot(sc, reduction = "phate", dims = c(1, 2))
 ```
 
 At this point, it's a good idea to save and reload the Seurat object so that we don't need to perform all the previous steps each time we want to do more downstream analysis.
 ```{r, results='hide', warning=FALSE, message=FALSE}
-# saveRDS(sc, file = paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/", 
-#                           samplename, "_hm38.Rds"))
-sc <- readRDS("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/Human_190429T1Pi_hm38.Rds")
+saveRDS(sc, file = paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/RData Files/",
+                          samplename, "_MT5_hm38.Rds"))
+sc <- readRDS(paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/RData Files/",
+                          samplename, "_MT5_hm38.Rds"))
 ```
 
 # Biomarker Identification
 After clustering and visualizing our cells, we'd like to assign cell types to each cluster. This is accomplished by determining which genes are significantly differentially expressed between clusters, and comparing those genes to canonical markers. 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 sc_markers <- FindAllMarkers(sc, only.pos = TRUE, test.use = "wilcox")
 top_markers <- sc_markers %>% group_by(cluster) %>% top_n(n = 1, wt = avg_logFC)
 top_markers
@@ -159,9 +184,7 @@ top_markers
 We visualize these results first in the context of the UMAP dimension reduction plot. 
 ```{r, message=FALSE, warning=FALSE}
 for (i in seq(nrow(top_markers))) {
-  par(mfrow = c(2, 1))
-  DimPlot(sc, reduction = "umap")
-  FeaturePlot(sc, features = top_markers$gene[i], dims = c(1, 2))
+  print(FeaturePlot(sc, features = top_markers$gene[i], dims = c(1, 2)))
 }
 ```
 
@@ -173,59 +196,121 @@ for (i in seq(nrow(top_markers))) {
 }
 ```
 
-Finally, we plot a heatmap of the top seven marker genes per cluster, showing that there are in fact significant differences in gene expression levels between clusters.
+Finally, we plot a heatmap of the top five marker genes per cluster, showing that there are in fact significant differences in gene expression levels between clusters.
 ```{r, message=FALSE, warning=FALSE}
-top7 <- sc_markers %>% group_by(cluster) %>% top_n(n = 7, wt = avg_logFC)
-DoHeatmap(sc, features = top7$gene, angle = 45) + NoLegend()
+top5 <- sc_markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+DoHeatmap(sc, features = top5$gene, angle = 45) + NoLegend()
 ```
 
 ## Assigning Cell Type Identities
-```{r}
-top2 <- sc_markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
-marker_df <- data.frame(c(0:10), rep(NA, 11), rep(NA, 11))
-colnames(marker_df) <- c("Cluster", "Biomarkers", "Cell Type")
-
-for (i in seq(nrow(marker_df))) {
-  marker_df$Biomarkers[i] <- paste0(top2$gene[2 * i - 1], ", ", top2$gene[2 * i])
+Here we use the `SingleR` package developed by Lun, *et al* to assign cell identities to the clusters previously generated by `Seurat`. At the moment, differential expression analysis is performed within `SingleR` using a Wilcox test. Once the kinks are worked out concerning `DESeq2` in the `FindAllMarkers()` function, we can provide `SingleR` with our own marker genes. `SingleR` uses reference data to assess similarity between our cell clusters and labeled expression data. The bulk reference data is comprised of microarrays from Mabbott *et al* (2013), whereas the single cell sequencing data comes from Muraro *et al* (2016).
+```{r SingleR, message=FALSE, warning=FALSE}
+norm_counts <- data.frame(sc@assays$RNA@data)
+bulk_ref <- HumanPrimaryCellAtlasData()
+sc_ref <- MuraroPancreasData()
+sc_ref <- sc_ref[, !is.na(sc_ref$label)]
+sc_ref <- logNormCounts(sc_ref)
+# remove chromosomal position indicator from rownames of single cell ref data
+for (i in seq(nrow(sc_ref))) {
+  rownames(sc_ref)[i] <- strsplit(rownames(sc_ref)[i], "__")[[1]][1]
 }
+
+bulk_preds <- SingleR(test = norm_counts, ref = bulk_ref, labels = bulk_ref$label.main, 
+                      method = "cluster", clusters = sc$seurat_clusters, de.method = "wilcox")
+table(bulk_preds$labels)
+
+sc_preds <- SingleR(test = norm_counts, ref = sc_ref, labels = sc_ref$label, 
+                 method = "cluster", clusters = sc$seurat_clusters, de.method = "wilcox")
+table(sc_preds$labels)
+
+sc[["SingleR.labels.bulk"]] <- bulk_preds$labels[match(sc[[]][["seurat_clusters"]], 
+                                                          rownames(bulk_preds))]
+sc[["SingleR.labels.sc"]] <- sc_preds$labels[match(sc[[]][["seurat_clusters"]], 
+                                                   rownames(sc_preds))]
 ```
 
-## Digital Cell Sorter
-To assign cell types to dimension-reduced clusters, we'll use the `DigitalCellSorter` tool, for which we'll have to make the switch to coding in Python. First, we save our counts matrix in a format that the `pandas` module can read.
-```{r}
-counts_df <- sc@assays$RNA@counts
-# write.csv(counts_df, "/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/counts.csv")
+The single cell reference did not perform well, assigning an "unclear" label to our epithelial and T cell clusters. I think the structure revealed in the PHATE plot is interesting, specifically the orthogonality of the epithelial and mesenchymal clusters. Also, in all the plots, the epithelial and T cells are placed closely together. This implies that they are proximal to one another in the high dimensional space as well.
+```{r, message=FALSE, warning=FALSE}
+DimPlot(sc, reduction = "tsne", label = TRUE, group.by = "SingleR.labels.bulk", repel = TRUE)
+DimPlot(sc, reduction = "tsne", label = TRUE, group.by = "SingleR.labels.sc", repel = TRUE)
+
+DimPlot(sc, reduction = "umap", label = TRUE, group.by = "SingleR.labels.bulk", repel = TRUE)
+DimPlot(sc, reduction = "umap", label = TRUE, group.by = "SingleR.labels.sc", repel = TRUE)
+
+DimPlot(sc, reduction = "phate", label = TRUE, group.by = "SingleR.labels.bulk", repel = TRUE)
+DimPlot(sc, reduction = "phate", label = TRUE, group.by = "SingleR.labels.sc", repel = TRUE)
 ```
 
-We import the necessary modules for cluster analysis.
-```{python}
-import DigitalCellSorter
-import pandas as pd
-import xlrd
+# Subtyping
+## Single Sample Classifier (SSC)
+```{r SSC}
+source("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Yeh_hg19mm10/SSC/create.classif.R")
+load("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Yeh_hg19mm10/SSC/fitteds_public_2018-11-03")
+
+classifier <- classifs[[1]]
+res <- create.classif(dat = sc@assays$RNA@data,
+                      classifier = classifier,
+                      dec = NULL,
+                      labels = NULL,
+                      fit = classifier$fit)
+
+res$subtypes <- ifelse(res$class == 1, "Basal", "Classical")
+res$score <- log(res$predprob/(1 - res$predprob))
+
+umap_df <- data.frame(Reductions(sc, slot = "umap")@cell.embeddings)
+umap_df$subtypes <- res$subtypes
+umap_df$score <- res$score
+p1 <- ggplot(umap_df, mapping = aes(x = UMAP_1, y = UMAP_2, col = subtypes)) +
+  geom_point(size = 1, alpha = 0.6) + 
+  theme_minimal()
+p1
+
+p2 <- ggplot(umap_df, mapping = aes(x = UMAP_1, y = UMAP_2, col = score)) +
+  geom_point(size = 1, alpha = 0.6) + 
+  theme_minimal()
+p2
 ```
 
-Here, the counts are read in and the indices of the `pandas` dataframe are coerced into the format that `DigitalCellSorter` prefers.
-```{python}
-counts = pd.read_csv("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/counts.csv")
-counts = pd.DataFrame(counts)
-# first we'll need to reset the indices as required by DigitalCellSorter
-counts.set_index('Unnamed: 0', inplace = True)
-counts = counts.rename_axis('"Unnamed: 0').rename_axis('cell', axis = 'columns')
-counts.head()
+## DECODER
+The `decoderr` package provides us with the single sample deconvolution functions.
+```{r DECODER}
+ref_set <- "TCGA_RNAseq_PAAD"
+sample_weights_unscaled <- Decon_single_sample(ref_set,
+                                     sc@assays$RNA@data,
+                                     "geneSymbol")
+sample_weights <- Norm_PDAC_weights(sample_weights_unscaled)
+sample_weights$samplename <- samplename
+
+umap_df$bc_ratio <- sample_weights$bcRatio
+umap_df$basal_tumor <- sample_weights_unscaled[, 9]
+umap_df$classical_tumor <- sample_weights_unscaled[, 5]
+
+p3 <- ggplot(umap_df, aes(UMAP_1, UMAP_2, color = bc_ratio)) +
+  geom_point(size = 1, alpha = 0.6) + 
+  theme_minimal() + 
+  scale_colour_gradient(low = "lightblue", high = "red") +
+  guides(color = guide_legend(override.aes = list(size = 3)))
+p3
+
+p4 <- ggplot(umap_df, aes(UMAP_1, UMAP_2, color = basal_tumor)) +
+  geom_point(size = 1, alpha = 0.6) + 
+  theme_minimal() + 
+  scale_colour_gradient(low = "lightblue", high = "red") +
+  guides(color = guide_legend(override.aes = list(size = 3)))
+p4
+
+p5 <- ggplot(umap_df, aes(UMAP_1, UMAP_2, color = classical_tumor)) +
+  geom_point(size = 1, alpha = 0.6) + 
+  theme_minimal() + 
+  scale_colour_gradient(low = "lightblue", high = "red") +
+  guides(color = guide_legend(override.aes = list(size = 3)))
+p5
 ```
 
-An object of class `DigitalCellSorter` is created. 
-```{python}
-DCS = DigitalCellSorter.DigitalCellSorter()
+# Saving
+Finally, we save the `Seurat` object with all the relevant analyses.
+```{r finalsave}
+saveRDS(sc, file = paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/RData Files/",
+                          samplename, "_MT5_hm38.Rds"))
 ```
 
-The `prepare()` function makes sure that the input data fit the object's parameters.
-```{python}
-expr_df = DCS.prepare(counts)
-expr_df.head()
-```
-
-Here is where the actual processing of the data will occur once I get the modules sorted out.
-```{python}
-# DCS.process(expr_df)
-```
