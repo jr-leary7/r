@@ -1,0 +1,75 @@
+---
+title: "A Comparison of Clustering Methods for Single Cell RNAseq Data"
+author: "Jack Leary"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: journal
+    highlight: tango
+    code_folding: show
+    df_print: paged
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Abstract
+The purpose of this analysis is to compare the accuracy of commonly-used clustering algorithms on single cell RNA sequencing (scRNAseq) data, and if possible, to determine which algorithm consistently outperforms the rest. Five different scRNAseq datasets will be used in an attempt to ensure stable results. The process for each dataset will be the same: normalization using `sctransform`, Principal Component Analysis (PCA), clustering in PCA space, visualization using non-linear methods, and assessment of accuracy in comparison to the provided cell labels. To ensure the reproducibility of results, the random seed $629$ will be used wherever applicable.
+
+# Libraries
+```{r libraries}
+library(dbscan)        # density based spatial clustering w/ applications of noise
+library(densityClust)  # density-peak clustering
+library(Seurat)        # for managing single cell data
+library(igraph)
+library(mclust)
+library(optCluster)
+library(Rtsne)         # for t-SNE visualizations
+library(uwot)          # for UMAP visualizations
+library(scRNAseq)      # for publically available labelled scRNAseq data
+library(sctransform)   # for normalizing scRNAseq data
+library(kernlab)       # for spectral clustering
+```
+
+# Data
+## Baron *et al* (2017)
+```{r baron}
+sc1 <- BaronPancreasData()
+sc1 <- as.Seurat(sc1, data = NULL)
+sc1 <- SCTransform(sc1, seed.use = 629)  # need to run again w/ seed next time before saving
+```
+
+## Segerstolpe *et al* (2016)
+```{r segerstolpe}
+sc2 <- SegerstolpePancreasData()
+sc2 <- as.Seurat(sc2, data = NULL)
+sc2 <- SCTransform(sc2, seed.use = 629)
+```
+
+# PCA
+```{r pca}
+sc1 <- RunPCA(sc1, npcs = 50, seed.use = 629)
+sc2 <- RunPCA(sc2, npcs = 50, seed.use = 629)
+```
+
+# Clustering
+## Preprocessing
+```{r}
+method_list <- c("k-means", "k-medians", "Spectral", "Graph-based w/ Louvain", 
+                 "DBSCAN", "HDBSCAN", "Density-peak", "Heirarchical")
+```
+
+## Function Definition and Execution
+```{r clusters}
+defineClust <- function(data.list, method.list) {
+  acc_df <- matrix(data = rep(NA, times = length(data.list) * length(method.list)))
+  rownames(acc_df) <- method.list
+  colnames(acc_df) <- names(data.list)
+  for (i in seq(data.list)) {
+    
+  }
+}
+```
+

@@ -12,10 +12,14 @@ output:
     df_print: paged
 ---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
 # Introduction
 This a a downstream analysis pipeline based on the `Seurat` package developed and maintained by the Satija Lab at the New York Genome Center. More information on the Satija Lab, their research, and the `Seurat` package can be found [here](https://satijalab.org). 
 
-```{r libraries, warning=FALSE, message=FALSE}
+```{r libraries}
 library(dplyr)
 library(Seurat)
 library(DESeq2)
@@ -28,11 +32,13 @@ library(uwot)
 library(phateR)
 library(reticulate)
 library(jackknife)
+library(DT)
+library(sctransform)
 ```
 
 Here we import the results of the `cellranger` analysis pipeline and save them in a Seurat object. Upon creation of the Seurat object, the sparse counts are subsetted to only include those genes that are found in at least three cells, and only those cells that include information on at least two hundred genes.
 ```{r import}
-path1 <- "/Volumes/Home/Jen Jen Yeh Lab/"
+path1 <- "/Volumes/Home/Jen Jen Yeh Lab/YeSu/Gen_RData/Single-cell/Moncada_GSE111672/"
 samplename <- "PDAC_B"
 path2 <- paste0(path1, samplename, "_outs")
 sparse_counts <- Read10X(data.dir = path2)
@@ -50,42 +56,26 @@ sparse_counts[c("AURKA", "TP53", "BRCA2"), 1:4]
 # Quality Control
 Some quality control metrics are computed automatically when the Seurat object is created. Let's take a look. 
 ```{r init_qc}
-head(sc@meta.data, 5)
+datatable(sc@meta.data, filter = "top", options = list(pageLength = 5, scrollX = TRUE))
 ```
 
 ## Mitochondrial QC
 Low quality cells often map a large percentage of their reads to the mitochondrial genome. Here we'll calculate that percentage for each cell.
 ```{r mito}
 sc[["percent_MT"]] <- PercentageFeatureSet(sc, pattern = "^MT-")
-head(sc@meta.data, 5)
+datatable(sc@meta.data, filter = "top", options = list(pageLength = 5, scrollX = TRUE))
 ```
 
 Here we visually compare different QC metrics, including the percentage of mitochondrial DNA that we just added.
-```{r mito_viz, message=FALSE, warning=FALSE}
+```{r mito_viz}
 VlnPlot(sc, features = c("nFeature_RNA", "nCount_RNA", "percent_MT"), ncol = 3, 
         pt.size = .1)
 ```
 
-We remove those cells that have feature counts below 200 and percent mitochondrial DNA above 10.
-```{r mito_qc}
-sc <- subset(sc, subset = nFeature_RNA > 200 & percent_MT < 10)
-```
-
-## Normalization
-This step performs log-normalization of our raw counts data using the default values provided by `Seurat`. 
-```{r norm, message=FALSE}
-sc <- NormalizeData(sc, normalization.method = "LogNormalize", 
-                    scale.factor = 10000)
-```
-
-# Feature Selection
-Now we want to find those genes that are *variably expressed*, i.e. they are highly expressed in some cells and lowly expressed in others. These genes will be the focus of our further downstream analysis, since they are more likely to contain biological signal. `Seurat V3` models the mean-variance relationship in several steps. First, the mean and variance of each gene's expression is calculated from the raw counts, and then transformed using $\log_{10}$. A loess (Locally Estimated Scatterplot Smoothing) curve is fitted to this data to predict the variance of each gene using the base R package `loess`. The variances are then standardized using a Z-score transformation, and the $n$ highest-variable genes are selected.
-```{r var_feats, warning=FALSE, message=FALSE}
-sc <- FindVariableFeatures(sc, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
-top_10 <- head(VariableFeatures(sc), 10)
-p1 <- VariableFeaturePlot(sc, pt.size = .5)
-p2 <- LabelPoints(p1, points = top_10, repel = TRUE)
-p2
+## Normalization and Scaling
+In this step, we use the `SCTransform` wrapper provided in `Seurat` to regress out unwanted sources of variation in our data (such as the percentage of mitochondrial DNA), as well as normalize and scale it. The function has two goals: to remove correlations of gene expression with sequencing depth, and to preserve biological heterogeneity while removing technical noise. This is accomplished by using a regularized negative binomial GLM to model the variance of each gene, and then normalizing its expression using the Pearson residuals of the model. `SCTransform()` also automatically selects the 3,000 most variable genes, based on the GLM, upon which we will perform further downstream analysis.
+```{r sctransform}
+sc <- SCTransform(sc, vars.to.regress = "percent_MT", seed.use = 629, verbose = FALSE)
 ```
 
 # Dimension Reduction
@@ -97,16 +87,25 @@ sc <- ScaleData(sc)
 
 ## PCA
 When running PCA, we'll use only the 2000 highly variable genes we identified earlier. This speeds up the process, and ensures that we're capturing sources of variation that are potentially biologically interesting. The visualization techniques below help us to determine sources of heterogeneity in our data.
-```{r pca, message=FALSE,results='hide'}
+```{r pca, results='hide'}
 sc <- RunPCA(sc, features = VariableFeatures(sc), npcs = 50)
 VizDimLoadings(sc, dims = 1:2, reduction = "pca")
 DimPlot(sc, reduction = "pca")
 DimHeatmap(sc, dims = 1:6, cells = 1500, balanced = TRUE, reduction = "pca")
 ```
 
+## Assigning Cell Cycle Scores
+Here we assign a stage of the cell cycle to each of our cells, based on a reference set of periodically expressed genes taken from Tirosh *et al* (2015). This isn't a dimensionality reduction step *per se*, but it's necessary to run the cell scoring algorithm in PCA space. We can later use the results to determine whether or not our clusters are determined by cell cycle stage rather than cell identity, and if so we can regress out the cell cycle effect using a generalized linear model.
+```{r cycle_scores}
+s_genes <- cc.genes.updated.2019$s.genes
+g2m_genes <- cc.genes.updated.2019$g2m.genes
+sc <- CellCycleScoring(sc, s.features = s_genes, g2m.features = g2m_genes, set.ident = FALSE)
+datatable(sc@meta.data, filter = "top", options = list(pageLength = 5, scrollX = TRUE))
+```
+
 ### Choosing principal components
 PCA is an unsupervised technique; this implies that just because it identifies a source of variation, that variation might just be noise. Fortunately, several techniques exist to aid us in determining which PCs capture statistically significant sources of heterogeneity. The `JackStraw` function uses bootstrap sampling and PCA to produce p-values for each principal component. We can see via the plot that the significance of the PCs stays strong through PC 50, so we'll use all 50 PCs going forward.
-```{r pca_check, results='hide', message=FALSE, warning=FALSE}
+```{r pca_check, results='hide'}
 sc <- JackStraw(sc, reduction = "pca", num.replicate = 100, dims = 50)
 sc <- ScoreJackStraw(sc, dims = 1:50)
 JackStrawPlot(sc, dims = 1:50)
@@ -118,7 +117,7 @@ Here we assign a stage of the cell cycle to each of our cells, based on a refere
 s_genes <- cc.genes.updated.2019$s.genes
 g2m_genes <- cc.genes.updated.2019$g2m.genes
 sc <- CellCycleScoring(sc, s.features = s_genes, g2m.features = g2m_genes, set.ident = FALSE)
-head(sc@meta.data)
+datatable(sc@meta.data, filter = "top", options = list(pageLength = 5, scrollX = TRUE))
 ```
 
 ## t-SNE
@@ -129,25 +128,44 @@ sc <- RunTSNE(sc, reduction = "pca", seed.use = 629, dims = 1:45, dim.embed = 2,
 
 ## UMAP
 Uniform Manifold Approximation and Projection is a fairly recent development in the area of dimension reduction that was proposed by McInnes *et al.* in 2018. It is very similar to t-SNE, although it's authors claim that it preserves both the global and local structure of your data. This means that the distances between the clusters in the low-dimensional space actually represent the distances between the clusters in the high-dimensional space, which they do not in t-SNE. Like t-SNE, it is a non-deterministic method, and it is best practice to provide a seed. 
-```{r umap, results='hide', message=FALSE, warning=FALSE}
+```{r umap, results='hide'}
 sc <- RunUMAP(sc, reduction = "pca", dims = 1:45, umap.method = "uwot", 
               n.components = 2, seed.use = 629, n.epochs = 700)
 ```
 
 ## PHATE
-Potential of Heat-diffusion for Affinity-based Trajectory Embedding is a very new method published by Moon *et al* at the end of 2019. Like UMAP, the authors claim that the algorithm "captures both local and global nonlinear structure." The algorithm was produced specifically with the analysis of high throughput sequencing data, such as single cell RNAseq, in mind.
-```{r phate, message=FALSE, warning=FALSE}
+Potential of Heat-diffusion for Affinity-based Trajectory Embedding is a very new method published by Moon *et al* at the end of 2019. Like UMAP, the authors claim that the algorithm "captures both local and global nonlinear structure." The algorithm was produced specifically with the analysis of high throughput sequencing data, such as single cell RNAseq, in mind.We'll need to use Python to implement the PHATE algorithm.
+```{r}
 pca_df <- data.frame(sc@reductions$pca@cell.embeddings)
-phate_df <- phate(pca_df[, 1:50], ndim = 2, mds.solver = "smacof", npca = NULL, seed = 629)
-phate_obj <- CreateDimReducObject(embedding = phate_df$embedding, 
-                     key = "PHATE_", 
-                     assay = "RNA")
+```
+
+We import the Python libraries we'll need to run PHATE.
+```{python}
+import pandas as pd
+import phate
+```
+
+After importing the necessary libraries, we initialize an instance of the PHATE function and fit the algorithm to the data. 
+```{python}
+pca_df = r.pca_df
+phate_op = phate.PHATE(n_components=2, knn=5, mds_solver='sgd', random_state=629, n_pca=None)
+phate_df = phate_op.fit_transform(pca_df)
+```
+
+Next we call the results from Python back into R, and add them to our Seurat object.
+```{r phate}
+phate_df <- as.matrix(py$phate_df)
+rownames(phate_df) <- colnames(sc)
+phate_obj <- CreateDimReducObject(embeddings = phate_df, 
+                                  key = "PHATE_", 
+                                  assay = "RNA", 
+                                  global = TRUE)
 sc@reductions$phate <- phate_obj
 ```
 
 # Clustering
 The main clustering method implemented in `Seurat` is graph-based. This type of clustering makes no assumptions about the true number of clusters, or the shape or density of the data, which is useful because scRNAseq data is so sparse. Cells are embedded onto a k-nearest neighbors graph in PCA space, and then iteratively sorted into clusters.
-```{r graph, results='hide', message=FALSE, warning=FALSE}
+```{r graph, results='hide'}
 sc <- FindNeighbors(sc, reduction = "pca")
 sc <- FindClusters(sc, resolution = .5)
 ```
@@ -177,7 +195,7 @@ DimPlot(sc, reduction = "phate", dims = c(1, 2), group.by = "Phase")
 ```
 
 At this point, it's a good idea to save and reload the Seurat object so that we don't need to perform all the previous steps each time we want to do more downstream analysis.
-```{r, results='hide', warning=FALSE, message=FALSE}
+```{r, results='hide'}
 saveRDS(sc, file = paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/RData Files/Moncada_",
                           samplename, "_hg38.Rds"))
 sc <- readRDS(paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/RData Files/Moncada_",
@@ -186,7 +204,7 @@ sc <- readRDS(paste0("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/RData F
 
 # Biomarker Identification
 After clustering and visualizing our cells, we'd like to assign cell types to each cluster. This is accomplished by determining which genes are significantly differentially expressed between clusters, and comparing those genes to canonical markers. 
-```{r, message=FALSE, warning=FALSE}
+```{r}
 sc_markers <- FindAllMarkers(sc, only.pos = TRUE, test.use = "wilcox")
 top_markers <- sc_markers %>% group_by(cluster) %>% top_n(n = 1, wt = avg_logFC)
 top_markers
@@ -194,14 +212,14 @@ top_markers
 
 ## Visualization
 We visualize these results first in the context of the UMAP dimension reduction plot. 
-```{r, message=FALSE, warning=FALSE}
+```{r}
 for (i in seq(nrow(top_markers))) {
   print(FeaturePlot(sc, features = top_markers$gene[i], reduction = "umap", dims = c(1, 2)))
 }
 ```
 
 Next, we use a violin plot of gene expression grouped by cluster to show how much each marker is differentially expressed.
-```{r, message=FALSE, warning=FALSE}
+```{r}
 for (i in seq(nrow(top_markers))) {
   p3 <- VlnPlot(sc, features = top_markers$gene[i])
   print(p3)
@@ -209,19 +227,18 @@ for (i in seq(nrow(top_markers))) {
 ```
 
 Finally, we plot a heatmap of the top five marker genes per cluster, showing that there are in fact significant differences in gene expression levels between clusters, with the possible exception of cluster 0. 
-```{r, message=FALSE, warning=FALSE}
+```{r}
 top5 <- sc_markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
 DoHeatmap(sc, features = top5$gene, angle = 45) + NoLegend()
 ```
 
 ## Assigning Cell Type Identities
-Here we use the `SingleR` package developed by Lun *et al* to assign cell identities to the clusters previously generated by `Seurat`. At the moment, differential expression analysis is performed within `SingleR` using a Wilcox test. Once the kinks are worked out concerning `DESeq2` in the `FindAllMarkers()` function, we can provide `SingleR` with our own marker genes. `SingleR` uses reference data to assess similarity between our cell clusters and labeled expression data. The bulk reference data is comprised of microarrays from Mabbott *et al* (2013), whereas the single cell sequencing data comes from Baron *et al* (2017).
-```{r SingleR, message=FALSE, warning=FALSE}
+Here we use the `SingleR` package developed by Lun *et al* to assign cell identities to the clusters previously generated by `Seurat`. At the moment, differential expression analysis is performed within `SingleR` using a Wilcox test. Once the kinks are worked out concerning `DESeq2` in the `FindAllMarkers()` function, we can provide `SingleR` with our own marker genes. `SingleR` uses reference data to assess similarity between our cell clusters and labeled expression data. The bulk reference data is comprised of microarrays from Mabbott *et al* (2013), whereas the single cell sequencing data comes from Baron *et al* (2017). Previously, the single cell reference was run through the same `sctransform` normalization workflow as our sample. 
+```{r SingleR}
 norm_counts <- data.frame(sc@assays$RNA@data)
 bulk_ref <- HumanPrimaryCellAtlasData()
-sc_ref <- BaronPancreasData()
+sc_ref <- readRDS("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Seurat/single_cell_ref_normalized.Rds")
 sc_ref <- sc_ref[, !is.na(sc_ref$label)]
-sc_ref <- logNormCounts(sc_ref)
 
 bulk_preds <- SingleR(test = norm_counts, ref = bulk_ref, labels = bulk_ref$label.main, 
                       method = "cluster", clusters = sc$seurat_clusters, de.method = "wilcox")
@@ -238,7 +255,7 @@ sc[["SingleR.labels.sc"]] <- sc_preds$labels[match(sc[[]][["seurat_clusters"]],
 ```
 
 According to the bulk reference, this sample has several epithelial clusters, inidcating that we have several types of epithelial cell. This was to be expected as the results of Moncada *et al* (2020) showed several ductal subclusters. The PHATE plot shows interesting trajectories in the endothelial, T, and neutrophil clusters.
-```{r, message=FALSE, warning=FALSE}
+```{r}
 DimPlot(sc, reduction = "tsne", label = TRUE, group.by = "SingleR.labels.bulk", repel = TRUE)
 DimPlot(sc, reduction = "tsne", label = TRUE, group.by = "SingleR.labels.sc", repel = TRUE)
 
@@ -265,7 +282,7 @@ source("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Old Single Cell Pipeline/Yeh
 load("/Volumes/Home/Jen Jen Yeh Lab/Jack/scRNAseq/Old Single Cell Pipeline/Yeh_hg19mm10/SSC/fitteds_public_2018-11-03")
 
 classifier <- classifs[[1]]
-res <- create.classif(dat = sc@assays$RNA@data,
+res <- create.classif(dat = sc@assays$SCT@data,
                       classifier = classifier,
                       dec = NULL,
                       labels = NULL,
@@ -294,7 +311,7 @@ The `decoderr` package provides us with the single sample deconvolution function
 ```{r DECODER}
 ref_set <- "TCGA_RNAseq_PAAD"
 sample_weights_unscaled <- Decon_single_sample(ref_set,
-                                     sc@assays$RNA@data,
+                                     sc@assays$SCT@data,
                                      "geneSymbol")
 sample_weights <- Norm_PDAC_weights(sample_weights_unscaled)
 sample_weights$samplename <- samplename
